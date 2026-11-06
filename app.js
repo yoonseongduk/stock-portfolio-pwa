@@ -272,7 +272,7 @@ async function fetchPriceDataGoKr(apiKey, symbol) {
     resultType: "json",
     numOfRows: "10",
     pageNo: "1",
-    srtnCd: symbol,
+    likeSrtnCd: symbol, // 주의: "srtnCd"는 이 API에서 조용히 무시되고 전체 목록이 돌아옴(실측 확인)
     beginBasDt: toBasDt(begin),
     endBasDt: toBasDt(end),
   });
