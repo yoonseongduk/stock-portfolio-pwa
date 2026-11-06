@@ -1,0 +1,526 @@
+* {
+  box-sizing: border-box;
+}
+
+:root {
+  /* 다크 배경(#0f172a)에서 색맹 접근성 검증을 통과한 차트용 색상 (dataviz 스킬 팔레트) */
+  --series-1: #3987e5; /* 파랑 */
+  --series-2: #d95926; /* 주황 */
+  --series-3: #199e70; /* 청록 */
+  --series-4: #c98500; /* 노랑 */
+  --series-5: #d55181; /* 마젠타 */
+  --series-6: #008300; /* 초록 */
+  --series-7: #9085e9; /* 보라 */
+  --series-other: #64748b; /* 기타(그 외 종목) 전용 중립색 */
+  --divergent-pos: #e66767; /* 수익(+) */
+  --divergent-neg: #3987e5; /* 손실(-) */
+  --chart-baseline: #334155;
+  --chart-gap: #0f172a;
+}
+
+body {
+  margin: 0;
+  font-family: -apple-system, system-ui, "Noto Sans KR", sans-serif;
+  background-color: #0f172a;
+  color: #e2e8f0;
+}
+
+header {
+  padding: 20px 16px 12px;
+  background-color: #14532d;
+  color: #ffffff;
+}
+
+header h1 {
+  margin: 0;
+  font-size: 20px;
+}
+
+header p {
+  margin: 4px 0 0;
+  font-size: 13px;
+  opacity: 0.85;
+}
+
+main {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.card {
+  background-color: #1e293b;
+  border-radius: 12px;
+  padding: 16px;
+  color: #e2e8f0;
+}
+
+.card h2 {
+  margin: 0 0 12px;
+  font-size: 15px;
+  color: #94a3b8;
+}
+
+.empty-message {
+  text-align: center;
+  color: #64748b;
+  margin: 0;
+}
+
+/* 입력 폼 */
+
+.field-row {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.field-row label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: #94a3b8;
+  flex: 1;
+}
+
+.field-row label.grow {
+  flex: 2;
+}
+
+.field-row input,
+.field-row select {
+  background-color: #0f172a;
+  border: 1px solid #334155;
+  border-radius: 8px;
+  color: #e2e8f0;
+  padding: 8px;
+  font-size: 14px;
+}
+
+#holding-form button {
+  width: 100%;
+  padding: 12px;
+  background-color: #16a34a;
+  color: #ffffff;
+  border: none;
+  border-radius: 8px;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+#holding-form button:active {
+  background-color: #15803d;
+}
+
+/* 합계 */
+
+.summary-group {
+  margin-bottom: 10px;
+}
+
+.summary-group:last-child {
+  margin-bottom: 0;
+}
+
+.summary-group h3 {
+  margin: 0 0 6px;
+  font-size: 13px;
+  color: #64748b;
+  font-weight: 500;
+}
+
+.summary-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 14px;
+  padding: 2px 0;
+}
+
+/* 보유 종목 목록 */
+
+.holding-item {
+  background-color: #0f172a;
+  border-radius: 10px;
+  padding: 12px;
+  margin-bottom: 10px;
+}
+
+.holding-item:last-child {
+  margin-bottom: 0;
+}
+
+.holding-item-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 8px;
+}
+
+.holding-item-name {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.holding-item-market {
+  font-size: 11px;
+  color: #64748b;
+  margin-left: 6px;
+}
+
+.holding-item-detail {
+  display: flex;
+  justify-content: space-between;
+  font-size: 13px;
+  color: #94a3b8;
+  margin-bottom: 4px;
+}
+
+.delete-btn {
+  background: none;
+  border: none;
+  color: #64748b;
+  font-size: 13px;
+  padding: 2px 6px;
+}
+
+.delete-btn:active {
+  color: #ef4444;
+}
+
+.profit-positive {
+  color: #f87171;
+}
+
+.profit-negative {
+  color: #60a5fa;
+}
+
+.profit-zero {
+  color: #94a3b8;
+}
+
+.hint-text {
+  font-size: 12px;
+  color: #64748b;
+  margin: -4px 0 10px;
+}
+
+/* 보유 종목: 현재가 입력칸 */
+
+.holding-item-price-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 13px;
+  color: #94a3b8;
+  margin-bottom: 8px;
+  gap: 8px;
+}
+
+.price-input {
+  width: 110px;
+  background-color: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 8px;
+  color: #e2e8f0;
+  padding: 6px 8px;
+  font-size: 13px;
+  text-align: right;
+}
+
+/* 거래내역 목록 */
+
+.tx-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background-color: #0f172a;
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  font-size: 13px;
+}
+
+.tx-item:last-child {
+  margin-bottom: 0;
+}
+
+.tx-item-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.tx-item-date {
+  color: #64748b;
+  font-size: 11px;
+}
+
+.tx-type-buy {
+  color: #f87171;
+  font-weight: 600;
+}
+
+.tx-type-sell {
+  color: #60a5fa;
+  font-weight: 600;
+}
+
+/* 대시보드: 스탯 타일 */
+
+.stat-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.stat-tile {
+  background-color: #0f172a;
+  border-radius: 10px;
+  padding: 12px;
+}
+
+.stat-label {
+  font-size: 12px;
+  color: #64748b;
+  margin-bottom: 6px;
+}
+
+.stat-value {
+  font-size: 20px;
+  font-weight: 600;
+  color: #e2e8f0;
+}
+
+.stat-delta {
+  font-size: 13px;
+  margin-top: 4px;
+}
+
+/* 종목 비중 */
+
+.share-block {
+  margin-bottom: 18px;
+}
+
+.share-block:last-child {
+  margin-bottom: 0;
+}
+
+.share-block h3 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  color: #64748b;
+  font-weight: 500;
+}
+
+.share-bar {
+  display: flex;
+  height: 20px;
+  border-radius: 6px;
+  overflow: hidden;
+  gap: 2px;
+  background-color: var(--chart-gap);
+}
+
+.share-segment {
+  flex: 0 0 auto;
+}
+
+.share-legend {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.legend-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.legend-swatch {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+
+.legend-name {
+  flex: 1;
+  color: #e2e8f0;
+}
+
+.legend-value {
+  color: #94a3b8;
+}
+
+/* 수익률 순위: 기준선 0%에서 양쪽으로 뻗는 막대 */
+
+.rank-row {
+  margin-bottom: 14px;
+}
+
+.rank-row:last-child {
+  margin-bottom: 0;
+}
+
+.rank-name {
+  font-size: 13px;
+  color: #e2e8f0;
+  margin-bottom: 4px;
+}
+
+.rank-name .rank-market {
+  font-size: 11px;
+  color: #64748b;
+  margin-left: 4px;
+}
+
+.rank-track {
+  display: flex;
+  align-items: center;
+  height: 20px;
+}
+
+.rank-half {
+  width: 50%;
+  display: flex;
+  align-items: center;
+  height: 100%;
+}
+
+.rank-half-neg {
+  justify-content: flex-end;
+  border-right: 1px solid var(--chart-baseline);
+}
+
+.rank-half-pos {
+  justify-content: flex-start;
+}
+
+.rank-bar {
+  height: 14px;
+  border-radius: 4px;
+}
+
+.rank-bar.neg {
+  background-color: var(--divergent-neg);
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.rank-bar.pos {
+  background-color: var(--divergent-pos);
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+}
+
+.rank-value {
+  font-size: 12px;
+  color: #94a3b8;
+  white-space: nowrap;
+}
+
+.rank-half-neg .rank-value {
+  margin-right: 6px;
+}
+
+.rank-half-pos .rank-value {
+  margin-left: 6px;
+}
+
+/* 설정 / 자동 조회 */
+
+.list-actions {
+  margin-bottom: 8px;
+}
+
+.secondary-btn {
+  width: 100%;
+  padding: 10px;
+  background-color: transparent;
+  color: #e2e8f0;
+  border: 1px solid #334155;
+  border-radius: 8px;
+  font-size: 14px;
+}
+
+.secondary-btn:active {
+  background-color: #334155;
+}
+
+.holding-item-symbol-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 13px;
+  color: #94a3b8;
+  margin-bottom: 8px;
+  gap: 8px;
+}
+
+.symbol-input-group {
+  display: flex;
+  gap: 6px;
+}
+
+.symbol-input {
+  width: 90px;
+  background-color: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 8px;
+  color: #e2e8f0;
+  padding: 6px 8px;
+  font-size: 13px;
+}
+
+.fetch-btn {
+  padding: 6px 10px;
+  background-color: #334155;
+  color: #e2e8f0;
+  border: none;
+  border-radius: 8px;
+  font-size: 12px;
+}
+
+.fetch-btn:active {
+  background-color: #475569;
+}
+
+/* 데이터 관리 / 배당 */
+
+.data-card h3 {
+  margin: 14px 0 6px;
+  font-size: 13px;
+  color: #94a3b8;
+  font-weight: 600;
+}
+
+.data-card h3:first-of-type {
+  margin-top: 0;
+}
+
+.button-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 4px;
+}
+
+.button-row .secondary-btn {
+  flex: 1;
+  min-width: 140px;
+}
+
+#dividend-summary {
+  margin: 10px 0;
+}
+
+#dividend-summary:empty {
+  margin: 0;
+}

@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>내 주식 현황</title>
+
+  <link rel="manifest" href="./manifest.json" />
+  <meta name="theme-color" content="#14532d" />
+  <link rel="icon" href="./icons/icon-192.png" />
+  <link rel="apple-touch-icon" href="./icons/icon-192.png" />
+
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <header>
+    <h1>내 주식 현황</h1>
+    <p>Sprint 5 — 백업·CSV 일괄등록·배당 기록</p>
+  </header>
+
+  <main>
+    <section class="card settings-card">
+      <h2>설정 — 시세 조회 API 키</h2>
+      <div class="field-row">
+        <label class="grow">
+          Twelve Data API 키 (미국 주식, 거의 실시간)
+          <input type="password" id="api-key-input" placeholder="가입 후 발급받은 키를 붙여넣으세요" autocomplete="off" />
+        </label>
+      </div>
+      <p class="hint-text">
+        무료 키는 twelvedata.com에서 이메일 가입만으로 발급됩니다.
+      </p>
+      <div class="field-row">
+        <label class="grow">
+          공공데이터포털 API 키 (국내 주식, 전일 종가)
+          <input type="password" id="kr-api-key-input" placeholder="활용신청 후 발급받은 '일반 인증키(Decoding)'를 붙여넣으세요" autocomplete="off" />
+        </label>
+      </div>
+      <p class="hint-text">
+        data.go.kr에서 회원가입 후 "금융위원회_주식시세정보"를 활용신청하면 발급됩니다.
+        <strong>실시간이 아니라 직전 영업일 종가</strong>만 제공합니다 (장중 현재가 아님).
+        두 키 모두 폰 안에만 저장되고, 시세를 조회할 때만 각 서버로 전송됩니다
+        (보유 종목·거래내역은 전송하지 않음).
+      </p>
+    </section>
+
+    <section class="card dashboard-card">
+      <h2>대시보드</h2>
+      <div id="dashboard-area">
+        <p class="empty-message">아직 보유 중인 종목이 없습니다.</p>
+      </div>
+    </section>
+
+    <section class="card share-card">
+      <h2>종목 비중</h2>
+      <div id="share-area">
+        <p class="empty-message">아직 보유 중인 종목이 없습니다.</p>
+      </div>
+    </section>
+
+    <section class="card rank-card">
+      <h2>수익률 순위</h2>
+      <div id="rank-area">
+        <p class="empty-message">아직 보유 중인 종목이 없습니다.</p>
+      </div>
+    </section>
+
+    <section class="card form-card">
+      <h2>거래 추가</h2>
+      <form id="transaction-form">
+        <div class="field-row">
+          <label>
+            날짜
+            <input type="date" name="date" required />
+          </label>
+          <label>
+            구분
+            <select name="market" required>
+              <option value="KR">국내</option>
+              <option value="US">미국</option>
+            </select>
+          </label>
+        </div>
+        <div class="field-row">
+          <label class="grow">
+            종목명
+            <input type="text" name="name" placeholder="예: 삼성전자" required />
+          </label>
+          <label>
+            매수/매도
+            <select name="type" required>
+              <option value="BUY">매수</option>
+              <option value="SELL">매도</option>
+            </select>
+          </label>
+        </div>
+        <div class="field-row">
+          <label>
+            수량
+            <input type="number" name="qty" step="any" min="0" required />
+          </label>
+          <label>
+            단가
+            <input type="number" name="price" step="any" min="0" required />
+          </label>
+          <label>
+            수수료
+            <input type="number" name="fee" step="any" min="0" value="0" />
+          </label>
+        </div>
+        <button type="submit">거래 추가</button>
+      </form>
+    </section>
+
+    <section class="card list-card">
+      <h2>보유 종목</h2>
+      <p class="hint-text">
+        종목마다 "시세 코드"를 입력해 두면(국내는 종목코드 6자리, 미국은 티커) 자동 조회가 가능합니다.
+        미국은 거의 실시간, <strong>국내는 전일 종가</strong>입니다. 코드를 모르거나 자동 조회가
+        안 되면 현재가 칸에 직접 입력해도 됩니다.
+      </p>
+      <div class="list-actions">
+        <button type="button" id="refresh-all-btn" class="secondary-btn">전체 종목 시세 새로고침</button>
+      </div>
+      <p id="fetch-status" class="hint-text"></p>
+      <div id="holdings-area">
+        <p class="empty-message">아직 보유 중인 종목이 없습니다.</p>
+      </div>
+    </section>
+
+    <section class="card tx-list-card">
+      <h2>거래내역</h2>
+      <div id="tx-area">
+        <p class="empty-message">아직 입력한 거래내역이 없습니다.</p>
+      </div>
+    </section>
+
+    <section class="card dividend-card">
+      <h2>배당 기록</h2>
+      <form id="dividend-form">
+        <div class="field-row">
+          <label>
+            날짜
+            <input type="date" name="date" required />
+          </label>
+          <label>
+            구분
+            <select name="market" required>
+              <option value="KR">국내</option>
+              <option value="US">미국</option>
+            </select>
+          </label>
+        </div>
+        <div class="field-row">
+          <label class="grow">
+            종목명
+            <input type="text" name="name" placeholder="예: 삼성전자" required />
+          </label>
+          <label>
+            배당금액
+            <input type="number" name="amount" step="any" min="0" required />
+          </label>
+        </div>
+        <button type="submit">배당 추가</button>
+      </form>
+      <div id="dividend-summary"></div>
+      <div id="dividend-area">
+        <p class="empty-message">아직 입력한 배당 기록이 없습니다.</p>
+      </div>
+    </section>
+
+    <section class="card data-card">
+      <h2>데이터 관리</h2>
+
+      <h3>거래내역 CSV (엑셀로 일괄 등록·확인)</h3>
+      <p class="hint-text">
+        컬럼: 날짜,구분,종목명,매수/매도,수량,단가,수수료,시세코드(선택). 시세코드를
+        비워두면 나중에 종목 카드의 "코드찾기" 버튼으로 채울 수 있습니다.
+      </p>
+      <div class="button-row">
+        <button type="button" id="export-csv-btn" class="secondary-btn">CSV 내보내기</button>
+        <button type="button" id="import-csv-btn" class="secondary-btn">CSV 가져오기</button>
+      </div>
+      <input type="file" id="import-csv-file" accept=".csv" style="display:none" />
+      <p id="csv-status" class="hint-text"></p>
+
+      <h3>전체 백업 (JSON)</h3>
+      <p class="hint-text">
+        거래내역·시세·배당·API 키 등 전부를 파일 하나로 저장/복원합니다.
+        <strong>API 키가 포함되므로 다른 사람과 공유하지 마세요.</strong>
+      </p>
+      <div class="button-row">
+        <button type="button" id="export-json-btn" class="secondary-btn">전체 백업 내보내기</button>
+        <button type="button" id="import-json-btn" class="secondary-btn">전체 백업 가져오기</button>
+      </div>
+      <input type="file" id="import-json-file" accept=".json" style="display:none" />
+      <p id="json-status" class="hint-text"></p>
+    </section>
+  </main>
+
+  <script src="./app.js"></script>
+</body>
+</html>
