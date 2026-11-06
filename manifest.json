@@ -1,4 +1,5 @@
 {
+  "id": "/stock-portfolio-pwa/",
   "name": "내 주식 현황",
   "short_name": "주식현황",
   "description": "국내주식 + 미국주식 보유 현황을 한눈에 보는 개인용 앱",
