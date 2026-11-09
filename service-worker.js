@@ -4,7 +4,7 @@
 // 주의: index.html/style.css/app.js 내용을 바꿀 때마다 CACHE_NAME의 버전을
 // 올려야 한다. 그래야 옛 캐시가 지워지고 새 파일을 받아온다.
 
-const CACHE_NAME = "stock-app-cache-v17";
+const CACHE_NAME = "stock-app-cache-v18";
 const CACHE_FILES = [
   "./index.html",
   "./style.css",

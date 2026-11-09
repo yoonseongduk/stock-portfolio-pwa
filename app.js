@@ -392,18 +392,20 @@ async function fetchPriceTwelveData(apiKey, symbol) {
 // 실시간이 아니라 "직전 영업일 종가"(하루 지연)이므로 그렇게 표시해야 한다.
 // 서비스키는 반드시 "일반 인증키(Decoding)"를 써야 한다 — URLSearchParams가
 // 자동으로 다시 인코딩하므로 Encoding 키를 쓰면 이중 인코딩으로 깨진다.
-async function fetchPriceDataGoKr(apiKey, symbol) {
+// 공공데이터포털 주식시세정보 호출 공통 함수(시세 조회와 코드 찾기가 같이 쓴다).
+// query 에 종목코드(likeSrtnCd)나 종목명(itmsNm, likeItmsNm) 조건을 넘긴다. 영업일을 모를 수 있어 9일 전부터 조회한다.
+async function fetchDataGoKrItems(apiKey, query, numOfRows, failMessage) {
   const pad = (n) => String(n).padStart(2, "0");
   const toBasDt = (d) => `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}`;
   const end = new Date();
-  const begin = new Date(end.getTime() - 9 * 24 * 60 * 60 * 1000); // 영업일 여유를 두고 9일 전부터
+  const begin = new Date(end.getTime() - 9 * 24 * 60 * 60 * 1000);
 
   const params = new URLSearchParams({
     serviceKey: apiKey,
     resultType: "json",
-    numOfRows: "10",
+    numOfRows: String(numOfRows),
     pageNo: "1",
-    likeSrtnCd: symbol, // 주의: "srtnCd"는 이 API에서 조용히 무시되고 전체 목록이 돌아옴(실측 확인)
+    ...query,
     beginBasDt: toBasDt(begin),
     endBasDt: toBasDt(end),
   });
@@ -415,11 +417,16 @@ async function fetchPriceDataGoKr(apiKey, symbol) {
 
   if (!data.response) {
     const msg = data?.OpenAPI_ServiceResponse?.cmmMsgHeader?.returnAuthMsg;
-    throw new Error(msg || "시세 조회에 실패했습니다.");
+    throw new Error(msg || failMessage);
   }
 
   const items = data.response?.body?.items?.item;
-  const list = Array.isArray(items) ? items : items ? [items] : [];
+  return Array.isArray(items) ? items : items ? [items] : [];
+}
+
+async function fetchPriceDataGoKr(apiKey, symbol) {
+  // 주의: 종목코드 조건은 "likeSrtnCd" 이다. "srtnCd"는 이 API에서 조용히 무시되고 전체 목록이 돌아온다(실측 확인).
+  const list = await fetchDataGoKrItems(apiKey, { likeSrtnCd: symbol }, 10, "시세 조회에 실패했습니다.");
   if (list.length === 0) {
     throw new Error("해당 종목코드의 시세 데이터가 없습니다.");
   }
@@ -461,39 +468,27 @@ async function fetchCurrentPrice(marketKind, symbol) {
 // 국내: 공공데이터포털에 종목코드(srtnCd) 대신 종목명(itmsNm)으로 질의해서 찾는다.
 // 같은 API·같은 키를 재사용(새 키 불필요).
 async function lookupSymbolKr(apiKey, name) {
-  const pad = (n) => String(n).padStart(2, "0");
-  const toBasDt = (d) => `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}`;
-  const end = new Date();
-  const begin = new Date(end.getTime() - 9 * 24 * 60 * 60 * 1000);
-
-  const params = new URLSearchParams({
-    serviceKey: apiKey,
-    resultType: "json",
-    numOfRows: "20",
-    pageNo: "1",
-    itmsNm: name,
-    beginBasDt: toBasDt(begin),
-    endBasDt: toBasDt(end),
-  });
-
-  const res = await fetch(
-    `https://apis.data.go.kr/1160100/GetStockSecuritiesInfoService_V2/getStockPriceInfo_V2?${params.toString()}`
-  );
-  const data = await res.json();
-
-  if (!data.response) {
-    const msg = data?.OpenAPI_ServiceResponse?.cmmMsgHeader?.returnAuthMsg;
-    throw new Error(msg || "종목코드 검색에 실패했습니다.");
+  const fail = "종목코드 검색에 실패했습니다.";
+  let list = await fetchDataGoKrItems(apiKey, { itmsNm: name }, 100, fail);
+  if (list.length === 0) {
+    // 같은 이름이 없으면 이름을 포함하는 종목을 후보로만 찾는다(자동 저장하지 않는다).
+    list = await fetchDataGoKrItems(apiKey, { likeItmsNm: name }, 100, fail);
   }
-
-  const items = data.response?.body?.items?.item;
-  const list = Array.isArray(items) ? items : items ? [items] : [];
   if (list.length === 0) {
     throw new Error("이름으로 찾은 종목이 없습니다.");
   }
 
   const exact = list.find((item) => item.itmsNm === name);
-  return (exact || list[0]).srtnCd;
+  const best = exact || list[0];
+  const seen = new Set();
+  const candidate_list = [];
+  list.forEach((item) => {
+    if (!seen.has(item.srtnCd) && candidate_list.length < 5) {
+      seen.add(item.srtnCd);
+      candidate_list.push(`${item.itmsNm}(${item.srtnCd})`);
+    }
+  });
+  return { symbol_code: best.srtnCd, matched_name: best.itmsNm, exact: Boolean(exact), candidate_list };
 }
 
 // 미국: Twelve Data symbol_search — 결과가 여러 거래소/ETF/워런트 섞여 나오므로
@@ -518,10 +513,15 @@ async function lookupSymbolUs(apiKey, name) {
     list.find((d) => usExchanges.includes(d.exchange) && d.instrument_type === "Common Stock") ||
     list.find((d) => usExchanges.includes(d.exchange)) ||
     list[0];
-  return best.symbol;
+  const target = name.trim().toLowerCase();
+  const exact = best.symbol.toLowerCase() === target || String(best.instrument_name || "").toLowerCase() === target;
+  const candidate_list = list.slice(0, 5).map((d) => `${d.instrument_name || d.symbol}(${d.symbol})`);
+  return { symbol_code: best.symbol, matched_name: best.instrument_name || best.symbol, exact, candidate_list };
 }
 
-async function lookupSymbol(marketKind, stockName) {
+// 시장별로 시세 코드를 찾는다. { symbol_code, matched_name, exact, candidate_list } 를 돌려준다.
+// exact 는 입력한 이름과 같은 종목을 찾았다는 뜻이다(아니면 최선 추정).
+async function lookupSymbolDetail(marketKind, stockName) {
   if (marketKind === "kr") {
     const apiKey = loadKrApiKey();
     if (!apiKey) throw new Error("공공데이터포털 API 키가 설정에 없습니다");
@@ -530,6 +530,84 @@ async function lookupSymbol(marketKind, stockName) {
   const apiKey = loadApiKey();
   if (!apiKey) throw new Error("Twelve Data API 키가 설정에 없습니다");
   return lookupSymbolUs(apiKey, stockName);
+}
+
+// 단건 '코드찾기'용: 최선 추정 코드 문자열만 돌려준다.
+async function lookupSymbol(marketKind, stockName) {
+  return (await lookupSymbolDetail(marketKind, stockName)).symbol_code;
+}
+
+// ===== 시세 코드 일괄 찾기 (design/03_시세코드일괄찾기.md) =====
+// 조회 간격(ms): 국내는 짧게, 미국은 Twelve Data 무료 플랜의 분당 8회 제한 때문에 길게.
+const SYMBOL_LOOKUP_GAP_MS = { kr: 200, us: 8000 };
+
+// 시세 코드가 비어 있는 보유 종목만 찾는다. 이름이 정확히 같을 때만 저장하고, 아니면 후보만 알린다.
+async function findMissingSymbols() {
+  const symbols = loadSymbols();
+  const targets = computeHoldings(loadTransactions()).filter((h) => !symbols[holdingKey(h.market_kind, h.stock_name)]);
+  const found = [];
+  const review = [];
+  const failed = [];
+
+  for (let i = 0; i < targets.length; i++) {
+    const h = targets[i];
+    setFetchStatus(`시세 코드 찾는 중... (${i + 1}/${targets.length}) ${h.stock_name}`);
+    try {
+      const r = await lookupSymbolDetail(h.market_kind, h.stock_name);
+      if (r.exact) {
+        const latest = loadSymbols(); // 중간에 사용자가 바꾼 값을 덮어쓰지 않게 매번 다시 읽는다
+        latest[holdingKey(h.market_kind, h.stock_name)] = r.symbol_code;
+        saveSymbols(latest);
+        found.push(`${h.stock_name} → ${r.symbol_code} (${r.matched_name})`);
+      } else {
+        review.push(`${h.stock_name}: 같은 이름 없음, 후보 ${r.candidate_list.join(", ")}`);
+      }
+    } catch (e) {
+      failed.push(`${h.stock_name}: ${e.message}`);
+    }
+    if (i < targets.length - 1) await sleep(SYMBOL_LOOKUP_GAP_MS[h.market_kind] ?? 0);
+  }
+  return { target_cnt: targets.length, found, review, failed };
+}
+
+function showSymbolBulkResult(result) {
+  const details = document.getElementById("symbol-bulk-details");
+  const list = document.getElementById("symbol-bulk-result");
+  list.textContent = "";
+  const add = (label, items) =>
+    items.forEach((text) => {
+      const li = document.createElement("li");
+      li.textContent = `${label} ${text}`;
+      list.appendChild(li);
+    });
+  add("✔ 저장", result.found);
+  add("? 확인 필요(저장 안 함)", result.review);
+  add("✖ 실패", result.failed);
+  document.getElementById("symbol-bulk-summary").textContent =
+    `일괄 찾기 결과 (저장 ${result.found.length} · 확인 필요 ${result.review.length} · 실패 ${result.failed.length})`;
+  details.hidden = false;
+  details.open = true;
+}
+
+function setupBulkSymbols() {
+  const button = document.getElementById("bulk-symbol-btn");
+  button.addEventListener("click", async () => {
+    button.disabled = true;
+    try {
+      const result = await findMissingSymbols();
+      if (result.target_cnt === 0) {
+        setFetchStatus("시세 코드가 비어 있는 종목이 없습니다.");
+        return;
+      }
+      render();
+      showSymbolBulkResult(result);
+      setFetchStatus(
+        `${result.found.length}건 찾아 저장함 · 확인 필요 ${result.review.length}건(저장 안 함) · 실패 ${result.failed.length}건`
+      );
+    } finally {
+      button.disabled = false;
+    }
+  });
 }
 
 /** 종목 하나의 현재가를 조회해 저장하고, 날짜별 히스토리에도 남긴다. */
@@ -1759,6 +1837,7 @@ setupSettings();
 setupForm();
 setupHoldingsActions();
 setupRefreshAll();
+setupBulkSymbols();
 setupTransactionActions();
 setupDividendForm();
 setupDividendActions();

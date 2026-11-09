@@ -49,9 +49,14 @@
     <section class="screen" data-screen="holdings" hidden>
       <div class="card list-card">
         <div class="list-actions">
-          <button type="button" id="refresh-all-btn" class="secondary-btn">전체 종목 시세 새로고침</button>
+          <button type="button" id="refresh-all-btn" class="secondary-btn">전체 시세 새로고침</button>
+          <button type="button" id="bulk-symbol-btn" class="secondary-btn">시세 코드 일괄 찾기</button>
         </div>
         <p id="fetch-status" class="hint-text"></p>
+        <details class="help" id="symbol-bulk-details" hidden>
+          <summary id="symbol-bulk-summary">일괄 찾기 결과</summary>
+          <ul id="symbol-bulk-result" class="result-list"></ul>
+        </details>
         <details class="help">
           <summary>사용 안내</summary>
           <p class="hint-text">
@@ -185,7 +190,7 @@
       <h3>CSV (엑셀로 일괄 등록·확인)</h3>
       <p class="hint-text">
         거래내역 컬럼: 날짜,구분,종목명,매수/매도,수량,단가,수수료,시세코드(선택). 시세코드를
-        비워두면 종목 카드의 "코드찾기"로 채울 수 있습니다.
+        비워두면 보유 화면의 "시세 코드 일괄 찾기"나 종목 카드의 "코드찾기"로 채울 수 있습니다.
         배당내역 컬럼: 날짜,구분,종목명,배당금액,원화금액,환율,환율기준일(뒤의 세 열은 미국 배당을 원화로 입력한 경우만). 배당은 이미 같은 내용이 있으면 가져올 때 건너뜁니다.
       </p>
       <div class="button-row">
