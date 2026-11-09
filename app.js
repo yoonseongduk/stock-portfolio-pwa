@@ -392,6 +392,7 @@ async function fetchPriceTwelveData(apiKey, symbol) {
     high_price: Number(data.high),
     low_price: Number(data.low),
     trade_volume: Number(data.volume),
+    exchange_kind: normalizeExchangeKind(data.exchange),
   };
 }
 
@@ -453,6 +454,7 @@ async function fetchPriceDataGoKr(apiKey, symbol) {
     high_price: Number(latest.hipr),
     low_price: Number(latest.lopr),
     trade_volume: Number(latest.trqu),
+    exchange_kind: normalizeExchangeKind(latest.mrktCtg),
   };
 }
 
@@ -495,7 +497,13 @@ async function lookupSymbolKr(apiKey, name) {
       candidate_list.push(`${item.itmsNm}(${item.srtnCd})`);
     }
   });
-  return { symbol_code: best.srtnCd, matched_name: best.itmsNm, exact: Boolean(exact), candidate_list };
+  return {
+    symbol_code: best.srtnCd,
+    matched_name: best.itmsNm,
+    exact: Boolean(exact),
+    candidate_list,
+    exchange_kind: normalizeExchangeKind(best.mrktCtg),
+  };
 }
 
 // 미국: Twelve Data symbol_search — 결과가 여러 거래소/ETF/워런트 섞여 나오므로
@@ -523,7 +531,13 @@ async function lookupSymbolUs(apiKey, name) {
   const target = name.trim().toLowerCase();
   const exact = best.symbol.toLowerCase() === target || String(best.instrument_name || "").toLowerCase() === target;
   const candidate_list = list.slice(0, 5).map((d) => `${d.instrument_name || d.symbol}(${d.symbol})`);
-  return { symbol_code: best.symbol, matched_name: best.instrument_name || best.symbol, exact, candidate_list };
+  return {
+    symbol_code: best.symbol,
+    matched_name: best.instrument_name || best.symbol,
+    exact,
+    candidate_list,
+    exchange_kind: normalizeExchangeKind(best.exchange),
+  };
 }
 
 // 시장별로 시세 코드를 찾는다. { symbol_code, matched_name, exact, candidate_list } 를 돌려준다.
@@ -575,6 +589,7 @@ async function findMissingSymbols() {
         const latest = loadSymbols(); // 중간에 사용자가 바꾼 값을 덮어쓰지 않게 매번 다시 읽는다
         latest[holdingKey(h.market_kind, h.stock_name)] = r.symbol_code;
         saveSymbols(latest);
+        if (r.exchange_kind) updateStockInfo(holdingKey(h.market_kind, h.stock_name), { exchange_kind: r.exchange_kind }, { onlyIfEmpty: true });
         found.push(`${h.stock_name} → ${r.symbol_code} (${r.matched_name})`);
       } else {
         review.push(`${h.stock_name}: 같은 이름 없음, 후보 ${r.candidate_list.join(", ")}`);
@@ -635,7 +650,7 @@ async function fetchAndUpdatePrice(marketKind, stockName) {
   if (!symbol) return { ok: false, message: "시세 코드가 없습니다" };
 
   try {
-    const { current_price, price_date, open_price, high_price, low_price, trade_volume } = await fetchCurrentPrice(
+    const { current_price, price_date, open_price, high_price, low_price, trade_volume, exchange_kind } = await fetchCurrentPrice(
       marketKind,
       symbol
     );
@@ -643,6 +658,7 @@ async function fetchAndUpdatePrice(marketKind, stockName) {
     prices[key] = current_price;
     savePrices(prices);
     appendPriceHistory(key, price_date, { open_price, high_price, low_price, close_price: current_price, trade_volume });
+    if (exchange_kind) updateStockInfo(key, { exchange_kind }, { onlyIfEmpty: true }); // 거래소가 비어 있을 때만 자동으로 채운다
     return { ok: true, current_price, price_date };
   } catch (e) {
     // 분당 한도 오류는 영어 원문이 길어서 짧은 한글로 바꿔 보여 준다.
@@ -866,71 +882,379 @@ function renderRank(holdings, prices) {
     .join("");
 }
 
-function renderHoldings(holdings, prices, symbols) {
-  const holdingsArea = document.getElementById("holdings-area");
+// ===== 보유 종목 그룹·필터·검색·상세 (design/07_보유종목그룹.md) =====
+const STOCK_INFO_KEY = "stockInfo_v2"; // stock_info_map: holding_key -> { exchange_kind, sector_name }
+const HOLDINGS_VIEW_KEY = "stockHoldingsView_v1"; // holdings_view
+const EXCHANGE_LABEL = { kospi: "코스피", kosdaq: "코스닥", konex: "코넥스", nasdaq: "나스닥", nyse: "NYSE", other: "기타" };
+const DEFAULT_HOLDINGS_VIEW = {
+  market_filter: "all", // all | kr | us
+  exchange_filter: "all", // all | kospi | kosdaq | unknown (국장일 때만)
+  sector_filter: "all", // all | __none | 섹터 이름
+  sort_kind: "value", // value | rate | name
+  group_kind: "market", // market | sector
+  search_text: "",
+};
 
-  if (holdings.length === 0) {
-    holdingsArea.innerHTML =
-      '<p class="empty-message">아직 보유 중인 종목이 없습니다.</p>';
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+}
+
+function loadStockInfo() {
+  const raw = localStorage.getItem(STOCK_INFO_KEY);
+  if (!raw) return {};
+  try {
+    return JSON.parse(raw);
+  } catch (e) {
+    console.error("종목정보를 읽는 중 오류:", e);
+    return {};
+  }
+}
+
+function saveStockInfo(info) {
+  localStorage.setItem(STOCK_INFO_KEY, JSON.stringify(info));
+}
+
+// 종목정보 한 종목의 값을 바꾼다. 빈 값은 그 항목을 지운다. onlyIfEmpty 면 이미 값이 있는 항목은 건드리지 않는다.
+function updateStockInfo(key, patch, options = {}) {
+  const info = loadStockInfo();
+  const current = { ...(info[key] || {}) };
+  let changed = false;
+  Object.entries(patch).forEach(([field, value]) => {
+    if (value === undefined) return;
+    if (value === "" || value === null) {
+      if (current[field] !== undefined) {
+        delete current[field];
+        changed = true;
+      }
+      return;
+    }
+    if (options.onlyIfEmpty && current[field]) return;
+    if (current[field] !== value) {
+      current[field] = value;
+      changed = true;
+    }
+  });
+  if (!changed) return false;
+  if (Object.keys(current).length === 0) delete info[key];
+  else info[key] = current;
+  saveStockInfo(info);
+  return true;
+}
+
+// 서비스 응답의 시장구분(KOSPI, KOSDAQ, NASDAQ, NYSE ...)을 exchange_kind 코드값으로 바꾼다. 모르면 "".
+function normalizeExchangeKind(raw) {
+  const x = String(raw || "").trim().toUpperCase();
+  if (!x) return "";
+  if (x.includes("KOSDAQ")) return "kosdaq";
+  if (x.includes("KOSPI")) return "kospi";
+  if (x.includes("KONEX")) return "konex";
+  if (x.includes("NASDAQ")) return "nasdaq";
+  if (x === "NYSE") return "nyse";
+  return "other";
+}
+
+function loadHoldingsView() {
+  const view = { ...DEFAULT_HOLDINGS_VIEW };
+  try {
+    const saved = JSON.parse(localStorage.getItem(HOLDINGS_VIEW_KEY) || "{}");
+    if (["all", "kr", "us"].includes(saved.market_filter)) view.market_filter = saved.market_filter;
+    if (["all", "kospi", "kosdaq", "unknown"].includes(saved.exchange_filter)) view.exchange_filter = saved.exchange_filter;
+    if (typeof saved.sector_filter === "string") view.sector_filter = saved.sector_filter;
+    if (["value", "rate", "name"].includes(saved.sort_kind)) view.sort_kind = saved.sort_kind;
+    if (["market", "sector"].includes(saved.group_kind)) view.group_kind = saved.group_kind;
+    if (typeof saved.search_text === "string") view.search_text = saved.search_text;
+  } catch (e) {
+    // 저장된 설정을 못 읽으면 기본값으로 시작한다
+  }
+  return view;
+}
+
+let holdingsView = loadHoldingsView();
+const openHoldingKeys = new Set(); // 펼쳐 둔 종목(화면을 다시 그려도 유지)
+const collapsedGroupIds = new Set(); // 접어 둔 그룹
+
+function saveHoldingsView() {
+  try {
+    localStorage.setItem(HOLDINGS_VIEW_KEY, JSON.stringify(holdingsView));
+  } catch (e) {
+    // 저장소를 못 쓰는 환경이면 기억만 건너뛴다
+  }
+}
+
+// 보유 종목마다 계산값과 분류 정보를 붙인다.
+function buildHoldingRows(holdings, prices, symbols, info) {
+  return holdings.map((h) => {
+    const key = holdingKey(h.market_kind, h.stock_name);
+    const currentPrice = prices[key] || 0;
+    const meta = info[key] || {};
+    return {
+      key,
+      h,
+      currentPrice,
+      symbol: symbols[key] || "",
+      exchange_kind: meta.exchange_kind || "",
+      sector_name: meta.sector_name || "",
+      ...calc(h, currentPrice),
+    };
+  });
+}
+
+function filterHoldingRows(rows, view) {
+  const q = view.search_text.trim().toLowerCase();
+  return rows.filter((r) => {
+    if (view.market_filter !== "all" && r.h.market_kind !== view.market_filter) return false;
+    if (view.market_filter === "kr" && view.exchange_filter !== "all") {
+      if (view.exchange_filter === "unknown" ? r.exchange_kind !== "" : r.exchange_kind !== view.exchange_filter) return false;
+    }
+    if (view.sector_filter !== "all") {
+      if (view.sector_filter === "__none" ? r.sector_name !== "" : r.sector_name !== view.sector_filter) return false;
+    }
+    if (q && !`${r.h.stock_name} ${r.sector_name} ${r.symbol}`.toLowerCase().includes(q)) return false;
+    return true;
+  });
+}
+
+function sortHoldingRows(rows, view) {
+  return [...rows].sort((a, b) => {
+    if (view.sort_kind === "name") return a.h.stock_name.localeCompare(b.h.stock_name, "ko");
+    if (view.sort_kind === "rate") return b.profit_rate - a.profit_rate;
+    const marketOrder = a.h.market_kind === b.h.market_kind ? 0 : a.h.market_kind === "kr" ? -1 : 1; // 평가금액순은 같은 시장 안에서만 비교
+    return marketOrder || b.evaluation_amount - a.evaluation_amount;
+  });
+}
+
+// 그룹 기준(시장·거래소 / 섹터)에 따라 [{id, label, rows}] 로 묶는다. 빈 그룹은 만들지 않는다.
+function groupHoldingRows(rows, view) {
+  if (view.group_kind === "sector") {
+    const map = new Map();
+    rows.forEach((r) => {
+      if (!map.has(r.sector_name)) map.set(r.sector_name, []);
+      map.get(r.sector_name).push(r);
+    });
+    const names = [...map.keys()].sort((a, b) => (a === "" ? 1 : b === "" ? -1 : a.localeCompare(b, "ko"))); // 미분류는 맨 뒤
+    return names.map((n) => ({ id: `s:${n}`, label: n || "섹터 미분류", rows: map.get(n) }));
+  }
+  const defs = [
+    ["m:kr:kospi", "국장 · 코스피", (r) => r.h.market_kind === "kr" && r.exchange_kind === "kospi"],
+    ["m:kr:kosdaq", "국장 · 코스닥", (r) => r.h.market_kind === "kr" && r.exchange_kind === "kosdaq"],
+    ["m:kr:konex", "국장 · 코넥스", (r) => r.h.market_kind === "kr" && r.exchange_kind === "konex"],
+    ["m:kr:none", "국장 · 거래소 미분류", (r) => r.h.market_kind === "kr" && !["kospi", "kosdaq", "konex"].includes(r.exchange_kind)],
+    ["m:us", "미장", (r) => r.h.market_kind === "us"],
+  ];
+  return defs.map(([id, label, test]) => ({ id, label, rows: rows.filter(test) })).filter((g) => g.rows.length > 0);
+}
+
+// 그룹 소계 문장. 원화와 달러는 섞지 않고 시장별로 따로 쓴다.
+function groupTotalsText(rows) {
+  return ["kr", "us"]
+    .map((m) => {
+      const items = rows.filter((r) => r.h.market_kind === m);
+      if (items.length === 0) return "";
+      const buy = items.reduce((sum, r) => sum + r.buy_amount, 0);
+      const evaluation = items.reduce((sum, r) => sum + r.evaluation_amount, 0);
+      return `평가 ${formatMoney(evaluation, m)} (${formatPercent(buy === 0 ? 0 : (evaluation - buy) / buy)})`;
+    })
+    .filter(Boolean)
+    .join(" · ");
+}
+
+function holdingRowHtml(r, ctx) {
+  const key = escapeHtml(r.key);
+  const market = r.h.market_kind;
+  const tags = [
+    `<span class="tag">${MARKET_LABEL[market]}</span>`,
+    r.exchange_kind ? `<span class="tag">${EXCHANGE_LABEL[r.exchange_kind]}</span>` : "",
+    r.sector_name ? `<span class="tag tag-sector">${escapeHtml(r.sector_name)}</span>` : "",
+  ].join("");
+  const marketTotal = ctx.marketTotals[market] || 0;
+  const share = marketTotal > 0 ? ((r.evaluation_amount / marketTotal) * 100).toFixed(1) : "0.0";
+  const trades = ctx.tradesByKey[r.key] || [];
+  const tradeHtml =
+    trades
+      .slice(0, 5)
+      .map(
+        (t) =>
+          `<li>${t.trade_date} ${t.trade_kind === "buy" ? "매수" : "매도"} ${formatQty(t.trade_quantity)}주 · ${formatMoney(t.unit_price, market)}</li>`
+      )
+      .join("") || "<li>거래내역 없음</li>";
+  const div = ctx.dividendByKey[r.key] || { count: 0, total: 0 };
+  const exchangeOptions = [["", "미분류"], ...Object.entries(EXCHANGE_LABEL)]
+    .map(([v, label]) => `<option value="${v}" ${v === r.exchange_kind ? "selected" : ""}>${label}</option>`)
+    .join("");
+  const symbolPlaceholder = { kr: "예: 005930", us: "예: AAPL" }[market];
+
+  return `
+    <details class="holding-item" data-key="${key}" ${openHoldingKeys.has(r.key) ? "open" : ""}>
+      <summary class="holding-summary">
+        <span class="hs-main">
+          <span class="holding-item-name">${escapeHtml(r.h.stock_name)}</span>
+          <span class="hs-tags">${tags}</span>
+        </span>
+        <span class="hs-value">
+          <span>${formatMoney(r.evaluation_amount, market)}</span>
+          <span class="${profitClass(r.profit_amount)}">${formatPercent(r.profit_rate)}</span>
+        </span>
+      </summary>
+      <div class="holding-body">
+        <div class="holding-item-detail">
+          <span>수량 ${formatQty(r.h.holding_quantity)} · 평균단가 ${formatMoney(r.h.average_price, market)}</span>
+        </div>
+        <div class="holding-item-symbol-row">
+          <span>시세 코드</span>
+          <div class="symbol-input-group">
+            <input class="symbol-input" type="text" data-action="symbol-input" data-key="${key}" value="${escapeHtml(r.symbol)}" placeholder="${symbolPlaceholder}" />
+            <button type="button" class="fetch-btn" data-action="lookup-symbol" data-key="${key}">코드찾기</button>
+            <button type="button" class="fetch-btn" data-action="fetch-price" data-key="${key}">조회</button>
+          </div>
+        </div>
+        <div class="holding-item-price-row">
+          <span>현재가</span>
+          <input class="price-input" type="number" step="any" min="0" data-action="price-input" data-key="${key}" value="${r.currentPrice || ""}" />
+        </div>
+        <div class="holding-item-detail">
+          <span>평가금액 ${formatMoney(r.evaluation_amount, market)}</span>
+          <span class="${profitClass(r.profit_amount)}">${formatMoney(r.profit_amount, market)} (${formatPercent(r.profit_rate)})</span>
+        </div>
+        <div class="holding-item-price-row">
+          <span>거래소</span>
+          <select class="info-select" data-action="exchange-select" data-key="${key}">${exchangeOptions}</select>
+        </div>
+        <div class="holding-item-price-row">
+          <span>섹터</span>
+          <input class="info-input" type="text" list="sector-list" data-action="sector-input" data-key="${key}" value="${escapeHtml(r.sector_name)}" placeholder="예: 반도체" />
+        </div>
+        <div class="holding-item-detail"><span>${MARKET_LABEL[market]} 비중 ${share}%</span></div>
+        <div class="hd-section">
+          <div class="hd-title">거래내역 ${trades.length}건 <span class="hd-note">(수정·삭제는 거래 탭에서)</span></div>
+          <ul class="hd-list">${tradeHtml}</ul>
+          ${trades.length > 5 ? `<div class="hd-note">외 ${trades.length - 5}건</div>` : ""}
+        </div>
+        <div class="hd-section">
+          <div class="hd-title">배당 ${div.count}건${div.count > 0 ? ` · 합계 ${formatMoney(div.total, market)}` : ""}</div>
+        </div>
+      </div>
+    </details>`;
+}
+
+function renderHoldingsToolbar(allRows, shownCount) {
+  const v = holdingsView;
+  document.querySelectorAll("#holdings-toolbar .chip").forEach((chip) => {
+    chip.classList.toggle("active", v[chip.dataset.hv] === chip.dataset.val);
+  });
+  document.getElementById("hv-exchange").hidden = v.market_filter !== "kr";
+  document.getElementById("hv-group").value = v.group_kind;
+  document.getElementById("hv-sort").value = v.sort_kind;
+  const sectors = [...new Set(allRows.map((r) => r.sector_name).filter(Boolean))].sort((a, b) => a.localeCompare(b, "ko"));
+  if (v.sector_filter !== "all" && v.sector_filter !== "__none" && !sectors.includes(v.sector_filter)) v.sector_filter = "all";
+  const sel = document.getElementById("hv-sector");
+  sel.innerHTML =
+    '<option value="all">전체 섹터</option><option value="__none">미분류</option>' +
+    sectors.map((n) => `<option value="${escapeHtml(n)}">${escapeHtml(n)}</option>`).join("");
+  sel.value = v.sector_filter;
+  const q = document.getElementById("hv-query");
+  if (q.value !== v.search_text) q.value = v.search_text;
+  document.getElementById("hv-count").textContent = `표시 ${shownCount} / 전체 ${allRows.length}종목`;
+}
+
+function renderHoldings(holdings, prices, symbols, info = {}, transactions = [], dividends = []) {
+  const holdingsArea = document.getElementById("holdings-area");
+  const allRows = buildHoldingRows(holdings, prices, symbols, info);
+
+  if (allRows.length === 0) {
+    holdingsArea.innerHTML = '<p class="empty-message">아직 보유 중인 종목이 없습니다.</p>';
+    renderHoldingsToolbar(allRows, 0);
     return;
   }
 
-  const marketLabel = MARKET_LABEL;
-  const symbolPlaceholder = { kr: "예: 005930", us: "예: AAPL" };
+  const rows = sortHoldingRows(filterHoldingRows(allRows, holdingsView), holdingsView);
+  renderHoldingsToolbar(allRows, rows.length);
 
-  holdingsArea.innerHTML = holdings
-    .map((h) => {
-      const key = holdingKey(h.market_kind, h.stock_name);
-      const currentPrice = prices[key] || 0;
-      const symbol = symbols[key] || "";
-      const { evaluation_amount, profit_amount, profit_rate } = calc(h, currentPrice);
+  // 비중 계산용(필터와 상관없이 시장 전체 기준), 종목별 거래·배당 묶음
+  const marketTotals = { kr: 0, us: 0 };
+  allRows.forEach((r) => (marketTotals[r.h.market_kind] += r.evaluation_amount));
+  const tradesByKey = {};
+  [...transactions]
+    .sort((a, b) => (a.trade_date === b.trade_date ? b.sequence_no - a.sequence_no : a.trade_date < b.trade_date ? 1 : -1))
+    .forEach((t) => {
+      (tradesByKey[holdingKey(t.market_kind, t.stock_name)] ||= []).push(t);
+    });
+  const dividendByKey = {};
+  dividends.forEach((d) => {
+    const k = holdingKey(d.market_kind, d.stock_name);
+    dividendByKey[k] = dividendByKey[k] || { count: 0, total: 0 };
+    dividendByKey[k].count += 1;
+    dividendByKey[k].total += d.dividend_amount;
+  });
+  const ctx = { marketTotals, tradesByKey, dividendByKey };
 
-      return `
-        <div class="holding-item" data-key="${key}">
-          <div class="holding-item-top">
-            <span>
-              <span class="holding-item-name">${h.stock_name}</span>
-              <span class="holding-item-market">${marketLabel[h.market_kind]}</span>
-            </span>
-          </div>
-          <div class="holding-item-detail">
-            <span>수량 ${formatQty(h.holding_quantity)} · 평균단가 ${formatMoney(h.average_price, h.market_kind)}</span>
-          </div>
-          <div class="holding-item-symbol-row">
-            <span>시세 코드</span>
-            <div class="symbol-input-group">
-              <input
-                class="symbol-input"
-                type="text"
-                data-action="symbol-input"
-                data-key="${key}"
-                value="${symbol}"
-                placeholder="${symbolPlaceholder[h.market_kind]}"
-              />
-              <button type="button" class="fetch-btn" data-action="lookup-symbol" data-key="${key}">코드찾기</button>
-              <button type="button" class="fetch-btn" data-action="fetch-price" data-key="${key}">조회</button>
-            </div>
-          </div>
-          <div class="holding-item-price-row">
-            <span>현재가</span>
-            <input
-              class="price-input"
-              type="number"
-              step="any"
-              min="0"
-              data-action="price-input"
-              data-key="${key}"
-              value="${currentPrice || ""}"
-            />
-          </div>
-          <div class="holding-item-detail">
-            <span>평가금액 ${formatMoney(evaluation_amount, h.market_kind)}</span>
-            <span class="${profitClass(profit_amount)}">${formatMoney(profit_amount, h.market_kind)} (${formatPercent(profit_rate)})</span>
-          </div>
-        </div>
-      `;
-    })
+  const groups = groupHoldingRows(rows, holdingsView);
+  const sectorOptions = [...new Set(allRows.map((r) => r.sector_name).filter(Boolean))]
+    .map((n) => `<option value="${escapeHtml(n)}"></option>`)
     .join("");
+  holdingsArea.innerHTML =
+    `<datalist id="sector-list">${sectorOptions}</datalist>` +
+    (groups.length === 0
+      ? '<p class="empty-message">조건에 맞는 종목이 없습니다.</p>'
+      : groups
+          .map(
+            (g) => `
+      <details class="holding-group" data-group="${escapeHtml(g.id)}" ${collapsedGroupIds.has(g.id) ? "" : "open"}>
+        <summary class="group-summary">
+          <span class="gs-title">${escapeHtml(g.label)} <span class="gs-count">(${g.rows.length}종목)</span></span>
+          <span class="gs-total">${groupTotalsText(g.rows)}</span>
+        </summary>
+        ${g.rows.map((r) => holdingRowHtml(r, ctx)).join("")}
+      </details>`
+          )
+          .join(""));
+}
+
+// 보유 화면만 다시 그린다(검색·필터를 바꿀 때).
+function renderHoldingsOnly() {
+  renderHoldings(computeHoldings(loadTransactions()), loadPrices(), loadSymbols(), loadStockInfo(), loadTransactions(), loadDividends());
+}
+
+function setupHoldingsView() {
+  const toolbar = document.getElementById("holdings-toolbar");
+  toolbar.addEventListener("click", (event) => {
+    const chip = event.target.closest(".chip");
+    if (!chip) return;
+    holdingsView[chip.dataset.hv] = chip.dataset.val;
+    if (chip.dataset.hv === "market_filter" && chip.dataset.val !== "kr") holdingsView.exchange_filter = "all";
+    saveHoldingsView();
+    renderHoldingsOnly();
+  });
+  [
+    ["hv-group", "group_kind"],
+    ["hv-sector", "sector_filter"],
+    ["hv-sort", "sort_kind"],
+  ].forEach(([id, field]) => {
+    document.getElementById(id).addEventListener("change", (event) => {
+      holdingsView[field] = event.target.value;
+      saveHoldingsView();
+      renderHoldingsOnly();
+    });
+  });
+  document.getElementById("hv-query").addEventListener("input", (event) => {
+    holdingsView.search_text = event.target.value;
+    saveHoldingsView();
+    renderHoldingsOnly();
+  });
+  // 그룹·종목을 접고 펼친 상태를 기억해서 화면을 다시 그려도 유지한다.
+  document.getElementById("holdings-area").addEventListener(
+    "toggle",
+    (event) => {
+      const el = event.target;
+      if (el.classList.contains("holding-item")) {
+        if (el.open) openHoldingKeys.add(el.dataset.key);
+        else openHoldingKeys.delete(el.dataset.key);
+      } else if (el.classList.contains("holding-group")) {
+        if (el.open) collapsedGroupIds.delete(el.dataset.group);
+        else collapsedGroupIds.add(el.dataset.group);
+      }
+    },
+    true
+  );
 }
 
 function renderTransactions(transactions) {
@@ -1035,7 +1359,7 @@ function render() {
   renderDashboard(holdings, prices);
   renderShare(holdings, prices);
   renderRank(holdings, prices);
-  renderHoldings(holdings, prices, symbols);
+  renderHoldings(holdings, prices, symbols, loadStockInfo(), transactions, loadDividends());
   renderTransactions(transactions);
   renderDividends(loadDividends());
 }
@@ -1203,6 +1527,20 @@ function setupHoldingsActions() {
       const symbols = loadSymbols();
       symbols[key] = symbolInput.value.trim();
       saveSymbols(symbols);
+      return;
+    }
+
+    const sectorInput = event.target.closest('[data-action="sector-input"]');
+    if (sectorInput) {
+      updateStockInfo(sectorInput.dataset.key, { sector_name: sectorInput.value.trim() });
+      render(); // 그룹과 섹터 목록이 바로 바뀐다
+      return;
+    }
+
+    const exchangeSelect = event.target.closest('[data-action="exchange-select"]');
+    if (exchangeSelect) {
+      updateStockInfo(exchangeSelect.dataset.key, { exchange_kind: exchangeSelect.value });
+      render();
     }
   });
 
@@ -1229,10 +1567,12 @@ function setupHoldingsActions() {
       const { market_kind, stock_name } = splitHoldingKey(key);
       setFetchStatus(`${stock_name} 시세 코드 찾는 중...`);
       try {
-        const symbol = await lookupSymbol(market_kind, stock_name);
+        const found = await lookupSymbolDetail(market_kind, stock_name);
+        const symbol = found.symbol_code;
         const symbols = loadSymbols();
         symbols[key] = symbol;
         saveSymbols(symbols);
+        if (found.exchange_kind) updateStockInfo(key, { exchange_kind: found.exchange_kind }, { onlyIfEmpty: true });
         setFetchStatus(`${stock_name}의 시세 코드를 "${symbol}"(으)로 채웠습니다. 맞는지 확인해 주세요.`);
         render();
       } catch (e) {
@@ -1771,6 +2111,65 @@ async function handleDividendCsvImportFile(file) {
   setDividendCsvStatus(summary);
 }
 
+// ===== 종목정보 CSV (구분,종목명,섹터,거래소) =====
+function setStockInfoCsvStatus(text) {
+  const el = document.getElementById("stock-info-csv-status");
+  if (el) el.textContent = text;
+}
+
+function buildStockInfoCsv(info, holdings) {
+  const keys = new Set([...Object.keys(info), ...holdings.map((h) => holdingKey(h.market_kind, h.stock_name))]);
+  const rows = [...keys].map((key) => {
+    const { market_kind, stock_name } = splitHoldingKey(key);
+    const meta = info[key] || {};
+    return [MARKET_LABEL[market_kind] || "", stock_name, meta.sector_name || "", EXCHANGE_LABEL[meta.exchange_kind] || ""];
+  });
+  rows.sort((a, b) => (a[0] === b[0] ? a[1].localeCompare(b[1], "ko") : a[0] === "국내" ? -1 : 1));
+  return [["구분", "종목명", "섹터", "거래소"], ...rows].map((cols) => cols.map(csvEscape).join(",")).join("\r\n");
+}
+
+// 종목정보 CSV 가져오기: 줄 단위로 검사하고, 비어 있는 칸은 기존 값을 지우지 않는다.
+async function handleStockInfoCsvImportFile(file) {
+  const BOM = String.fromCharCode(0xfeff);
+  const text = (await file.text()).replace(new RegExp("^" + BOM), "");
+  const rows = parseCsv(text);
+  if (rows.length <= 1) {
+    setStockInfoCsvStatus("가져올 내용이 없습니다 (빈 파일이거나 머리글만 있음).");
+    return;
+  }
+  const marketFromLabel = { 국내: "kr", 미국: "us" };
+  const exchangeFromLabel = Object.fromEntries(Object.entries(EXCHANGE_LABEL).map(([k, v]) => [v, k]));
+  let applied = 0;
+  const errors = [];
+  rows.slice(1).forEach((cols, idx) => {
+    const lineNo = idx + 2;
+    if (cols.every((c) => c.trim() === "")) return;
+    const [marketLabel, name, sector, exchangeLabel] = cols.map((c) => (c || "").trim());
+    const market_kind = marketFromLabel[marketLabel];
+    if (!market_kind) {
+      errors.push(`${lineNo}줄: 구분은 "국내" 또는 "미국"`);
+      return;
+    }
+    if (!name) {
+      errors.push(`${lineNo}줄: 종목명 없음`);
+      return;
+    }
+    if (exchangeLabel && !exchangeFromLabel[exchangeLabel]) {
+      errors.push(`${lineNo}줄: 거래소는 ${Object.values(EXCHANGE_LABEL).join("/")} 중 하나`);
+      return;
+    }
+    updateStockInfo(holdingKey(market_kind, name), {
+      sector_name: sector || undefined,
+      exchange_kind: exchangeLabel ? exchangeFromLabel[exchangeLabel] : undefined,
+    });
+    applied++;
+  });
+  render();
+  setStockInfoCsvStatus(
+    `${applied}줄 적용` + (errors.length > 0 ? ` · ${errors.length}줄 건너뜀 (${errors.slice(0, 5).join(", ")}${errors.length > 5 ? " 외" : ""})` : "")
+  );
+}
+
 function collectBackupData() {
   return {
     backup_app_name: "주식현황관리",
@@ -1781,6 +2180,7 @@ function collectBackupData() {
     symbol_code_map: loadSymbols(),
     price_history_map: loadPriceHistory(),
     dividend_list: loadDividends(),
+    stock_info_map: loadStockInfo(),
     us_price_api_key: loadApiKey(),
     kr_price_api_key: loadKrApiKey(),
   };
@@ -1814,6 +2214,7 @@ async function handleJsonImportFile(file) {
   if (data.symbol_code_map && typeof data.symbol_code_map === "object") saveSymbols(data.symbol_code_map);
   if (data.price_history_map && typeof data.price_history_map === "object") savePriceHistory(data.price_history_map);
   if (Array.isArray(data.dividend_list)) saveDividends(data.dividend_list);
+  if (data.stock_info_map && typeof data.stock_info_map === "object") saveStockInfo(data.stock_info_map);
   if (typeof data.us_price_api_key === "string") saveApiKey(data.us_price_api_key);
   if (typeof data.kr_price_api_key === "string") saveKrApiKey(data.kr_price_api_key);
 
@@ -1853,6 +2254,21 @@ function setupDataManagement() {
     if (!file) return;
     await handleDividendCsvImportFile(file);
     dividendCsvFileInput.value = "";
+  });
+
+  document.getElementById("export-stock-info-csv-btn").addEventListener("click", () => {
+    const csv = buildStockInfoCsv(loadStockInfo(), computeHoldings(loadTransactions()));
+    downloadTextFile(`종목정보_${todayISO()}.csv`, String.fromCharCode(0xfeff) + csv, "text/csv;charset=utf-8");
+    setStockInfoCsvStatus("종목정보 CSV 파일을 내보냈습니다.");
+  });
+
+  const stockInfoFileInput = document.getElementById("import-stock-info-csv-file");
+  document.getElementById("import-stock-info-csv-btn").addEventListener("click", () => stockInfoFileInput.click());
+  stockInfoFileInput.addEventListener("change", async () => {
+    const file = stockInfoFileInput.files[0];
+    if (!file) return;
+    await handleStockInfoCsvImportFile(file);
+    stockInfoFileInput.value = "";
   });
 
   document.getElementById("export-json-btn").addEventListener("click", () => {
@@ -2035,6 +2451,7 @@ setupForm();
 setupHoldingsActions();
 setupRefreshAll();
 setupBulkSymbols();
+setupHoldingsView();
 setupTransactionActions();
 setupDividendForm();
 setupDividendActions();

@@ -67,6 +67,40 @@
             찾지 못하니 티커(예: GOOGL)를 "시세 코드" 칸에 직접 입력해 주세요.
           </p>
         </details>
+        <!-- 보기 설정: 시장·거래소·섹터 필터, 그룹·정렬, 검색 (design/07_보유종목그룹.md) -->
+        <div class="holdings-toolbar" id="holdings-toolbar">
+          <div class="chip-row" id="hv-market">
+            <button type="button" class="chip" data-hv="market_filter" data-val="all">전체</button>
+            <button type="button" class="chip" data-hv="market_filter" data-val="kr">국장</button>
+            <button type="button" class="chip" data-hv="market_filter" data-val="us">미장</button>
+          </div>
+          <div class="chip-row" id="hv-exchange" hidden>
+            <button type="button" class="chip" data-hv="exchange_filter" data-val="all">전체</button>
+            <button type="button" class="chip" data-hv="exchange_filter" data-val="kospi">코스피</button>
+            <button type="button" class="chip" data-hv="exchange_filter" data-val="kosdaq">코스닥</button>
+            <button type="button" class="chip" data-hv="exchange_filter" data-val="unknown">미분류</button>
+          </div>
+          <div class="field-row">
+            <label>그룹
+              <select id="hv-group">
+                <option value="market">시장별</option>
+                <option value="sector">섹터별</option>
+              </select>
+            </label>
+            <label>섹터
+              <select id="hv-sector"></select>
+            </label>
+            <label>정렬
+              <select id="hv-sort">
+                <option value="value">평가금액</option>
+                <option value="rate">수익률</option>
+                <option value="name">이름</option>
+              </select>
+            </label>
+          </div>
+          <input type="search" id="hv-query" placeholder="종목·섹터·시세 코드 검색" autocomplete="off" />
+          <p id="hv-count" class="hint-text"></p>
+        </div>
         <div id="holdings-area">
           <p class="empty-message">아직 보유 중인 종목이 없습니다.</p>
         </div>
@@ -197,6 +231,7 @@
         거래내역 컬럼: 날짜,구분,종목명,매수/매도,수량,단가,수수료,시세코드(선택). 시세코드를
         비워두면 보유 화면의 "시세 코드 일괄 찾기"나 종목 카드의 "코드찾기"로 채울 수 있습니다.
         배당내역 컬럼: 날짜,구분,종목명,배당금액,원화금액,환율,환율기준일(뒤의 세 열은 미국 배당을 원화로 입력한 경우만). 배당은 이미 같은 내용이 있으면 가져올 때 건너뜁니다.
+        종목정보 컬럼: 구분,종목명,섹터,거래소(코스피/코스닥/코넥스/나스닥/NYSE/기타). 비워 둔 칸은 기존 값을 지우지 않습니다.
       </p>
       <div class="button-row">
         <button type="button" id="export-csv-btn" class="secondary-btn">거래내역 내보내기</button>
@@ -210,6 +245,12 @@
       </div>
       <input type="file" id="import-dividend-csv-file" accept=".csv" style="display:none" />
       <p id="dividend-csv-status" class="hint-text"></p>
+      <div class="button-row">
+        <button type="button" id="export-stock-info-csv-btn" class="secondary-btn">종목정보 내보내기</button>
+        <button type="button" id="import-stock-info-csv-btn" class="secondary-btn">종목정보 가져오기</button>
+      </div>
+      <input type="file" id="import-stock-info-csv-file" accept=".csv" style="display:none" />
+      <p id="stock-info-csv-status" class="hint-text"></p>
 
       <h3>전체 백업 (JSON)</h3>
       <p class="hint-text">
