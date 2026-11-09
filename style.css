@@ -1089,3 +1089,34 @@ details.help summary {
   padding-left: 0;
   margin-left: auto;
 }
+
+/* 원화 환산 합계 칸 */
+.stat-total {
+  grid-column: 1 / -1;
+}
+
+.fx-note {
+  margin-top: 4px;
+  font-size: 11px;
+  color: #94a3b8;
+}
+
+.fx-manual {
+  margin-top: 4px;
+}
+
+.fx-manual-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.fx-manual-row input {
+  width: 110px;
+  padding: 4px 6px;
+  background-color: #0f172a;
+  border: 1px solid #334155;
+  border-radius: 6px;
+  color: #e2e8f0;
+  font-size: 12px;
+}

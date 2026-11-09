@@ -769,7 +769,7 @@ function renderDashboard(holdings, prices) {
     .join("");
 
   area.innerHTML = tilesHtml
-    ? `<div class="stat-grid">${tilesHtml}</div>`
+    ? `<div class="stat-grid">${fxTotalTileHtml(holdings, prices)}${tilesHtml}</div>`
     : '<p class="empty-message">아직 보유 중인 종목이 없습니다.</p>';
 }
 
@@ -834,8 +834,7 @@ function renderShare(holdings, prices) {
     })
     .join("");
 
-  area.innerHTML =
-    blocksHtml || '<p class="empty-message">아직 보유 중인 종목이 없습니다.</p>';
+  area.innerHTML = combinedShareHtml(holdings, prices) + blocksHtml || '<p class="empty-message">아직 보유 중인 종목이 없습니다.</p>';
 }
 
 // 수익률 순위: 0%를 기준선으로 양쪽으로 뻗는 막대. %는 단위가 없어
@@ -1055,7 +1054,17 @@ function groupHoldingRows(rows, view) {
 
 // 그룹 소계 문장. 원화와 달러는 섞지 않고 시장별로 따로 쓴다.
 function groupTotalsText(rows) {
-  return ["kr", "us"]
+  const fx = loadFxRate();
+  const both = rows.some((r) => r.h.market_kind === "kr") && rows.some((r) => r.h.market_kind === "us");
+  const combined =
+    both && fx
+      ? ` · 합계 ${formatMoney(
+          rows.reduce((sum, r) => sum + r.evaluation_amount * (r.h.market_kind === "us" ? Number(fx.krw_per_usd) : 1), 0),
+          "kr"
+        )}`
+      : "";
+  return (
+    ["kr", "us"]
     .map((m) => {
       const items = rows.filter((r) => r.h.market_kind === m);
       if (items.length === 0) return "";
@@ -1064,7 +1073,8 @@ function groupTotalsText(rows) {
       return `평가 ${formatMoney(evaluation, m)} (${formatPercent(buy === 0 ? 0 : (evaluation - buy) / buy)})`;
     })
     .filter(Boolean)
-    .join(" · ");
+    .join(" · ") + combined
+  );
 }
 
 // 섹터 선택 목록: 미분류 / 섹터들 / 새 섹터 입력
@@ -2116,6 +2126,136 @@ function updateDividendCurrencyFields(form) {
   document.getElementById("dividend-amount-label").textContent = isKrw ? "배당금액(원)" : isUs ? "배당금액($)" : "배당금액";
 }
 
+// ===== 환율(오늘 1달러당 원) (design/09_환율반영.md) =====
+const FX_KEY = "stockFxRate_v1"; // fx_rate: { krw_per_usd, krw_per_usd_date, fetched_at, is_manual }
+const FX_STALE_MS = 12 * 60 * 60 * 1000; // 자동 갱신 주기
+
+function loadFxRate() {
+  try {
+    const v = JSON.parse(localStorage.getItem(FX_KEY) || "null");
+    return v && Number(v.krw_per_usd) > 0 ? v : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function saveFxRate(value) {
+  localStorage.setItem(FX_KEY, JSON.stringify(value));
+}
+
+// 서비스에서 최신 환율을 받아 저장한다(직접 입력 표시는 지운다).
+async function refreshFxRate() {
+  const r = await fetchUsdKrwRate("latest");
+  const value = { krw_per_usd: r.krw_per_usd, krw_per_usd_date: r.krw_per_usd_date, fetched_at: new Date().toISOString(), is_manual: false };
+  saveFxRate(value);
+  return value;
+}
+
+// 앱을 열 때: 미국 보유 종목이 있고, 환율이 없거나 12시간이 지났고 직접 입력한 값이 아니면 새로 받는다.
+async function ensureFxRate() {
+  if (!loadAutoFillEnabled()) return;
+  if (!computeHoldings(loadTransactions()).some((h) => h.market_kind === "us")) return;
+  const cur = loadFxRate();
+  if (cur && (cur.is_manual || Date.now() - Date.parse(cur.fetched_at) < FX_STALE_MS)) return;
+  try {
+    await refreshFxRate();
+    render();
+  } catch (e) {
+    console.warn("환율을 받지 못했습니다(이전 값을 그대로 씁니다):", e);
+  }
+}
+
+// 현황 맨 위 '총 평가금액(원화 환산)' 칸. 미국 종목이 없으면 비어 있다.
+function fxTotalTileHtml(holdings, prices) {
+  if (!holdings.some((h) => h.market_kind === "us")) return "";
+  const manual = `<details class="help fx-manual"><summary>환율 직접 입력</summary>
+      <span class="fx-manual-row"><input id="fx-input" type="number" step="any" min="0" placeholder="예: 1400" />
+      <button type="button" class="fetch-btn" data-action="fx-save">저장</button></span></details>`;
+  const fx = loadFxRate();
+  if (!fx) {
+    return `<div class="stat-tile stat-total"><div class="stat-label">총 평가금액 (원화 환산)</div>
+      <div class="fx-note">환율을 아직 가져오지 못했습니다. <button type="button" class="fetch-btn" data-action="fx-refresh">환율 가져오기</button></div>
+      <div id="fx-status" class="fx-note"></div>${manual}</div>`;
+  }
+  const rate = Number(fx.krw_per_usd);
+  let buy = 0;
+  let evaluation = 0;
+  holdings.forEach((h) => {
+    const c = calc(h, prices[holdingKey(h.market_kind, h.stock_name)] || 0);
+    const k = h.market_kind === "us" ? rate : 1;
+    buy += c.buy_amount * k;
+    evaluation += c.evaluation_amount * k;
+  });
+  const profit = evaluation - buy;
+  return `<div class="stat-tile stat-total">
+      <div class="stat-label">총 평가금액 (원화 환산)</div>
+      <div class="stat-value">${formatMoney(evaluation, "kr")}</div>
+      <div class="stat-delta ${profitClass(profit)}">${formatMoney(profit, "kr")} (${formatPercent(buy === 0 ? 0 : profit / buy)})</div>
+      <div class="fx-note">환율 ${rate.toLocaleString("ko-KR")}원/$ · ${escapeHtml(fx.krw_per_usd_date)} 기준${fx.is_manual ? " (직접 입력)" : ""}
+        <button type="button" class="fetch-btn" data-action="fx-refresh">갱신</button></div>
+      <div id="fx-status" class="fx-note"></div>
+      <div class="fx-note">미국 손익은 달러 손익을 오늘 환율로 옮긴 값이라 환차손익은 포함되지 않습니다.</div>${manual}</div>`;
+}
+
+// 국내+미국을 합친 전체 비중(원화 환산) 블록. 환율이 없거나 미국 종목이 없으면 비어 있다.
+function combinedShareHtml(holdings, prices) {
+  const fx = loadFxRate();
+  if (!fx || !holdings.some((h) => h.market_kind === "us")) return "";
+  const rate = Number(fx.krw_per_usd);
+  const items = holdings
+    .map((h) => ({
+      stock_name: h.stock_name,
+      evaluation_amount: calc(h, prices[holdingKey(h.market_kind, h.stock_name)] || 0).evaluation_amount * (h.market_kind === "us" ? rate : 1),
+    }))
+    .sort((a, b) => b.evaluation_amount - a.evaluation_amount);
+  const total = items.reduce((sum, x) => sum + x.evaluation_amount, 0);
+  const top = items.slice(0, SHARE_COLORS.length);
+  const rest = items.slice(SHARE_COLORS.length);
+  const slots = top.map((x, i) => ({ ...x, color: SHARE_COLORS[i] }));
+  if (rest.length > 0) {
+    slots.push({ stock_name: `기타 (${rest.length}종목)`, evaluation_amount: rest.reduce((sum, x) => sum + x.evaluation_amount, 0), color: SHARE_OTHER_COLOR });
+  }
+  const pct = (v) => (total === 0 ? 0 : (v / total) * 100);
+  const segments = slots.map((x) => `<div class="share-segment" style="width:${pct(x.evaluation_amount)}%;background-color:${x.color}"></div>`).join("");
+  const legend = slots
+    .map(
+      (x) => `<div class="legend-row"><span class="legend-swatch" style="background-color:${x.color}"></span>
+        <span class="legend-name">${escapeHtml(x.stock_name)}</span>
+        <span class="legend-value">${pct(x.evaluation_amount).toFixed(1)}% · ${formatMoney(x.evaluation_amount, "kr")}</span></div>`
+    )
+    .join("");
+  return `<div class="share-block share-combined"><h3>전체 비중 (원화 환산)</h3><div class="share-bar">${segments}</div><div class="share-legend">${legend}</div></div>`;
+}
+
+function setupFxActions() {
+  document.getElementById("dashboard-area").addEventListener("click", async (event) => {
+    const refresh = event.target.closest('[data-action="fx-refresh"]');
+    if (refresh) {
+      const status = document.getElementById("fx-status");
+      if (status) status.textContent = "환율을 받는 중...";
+      try {
+        await refreshFxRate();
+        render();
+      } catch (e) {
+        const el = document.getElementById("fx-status");
+        if (el) el.textContent = `환율을 가져오지 못했습니다: ${e.message}`;
+      }
+      return;
+    }
+    const save = event.target.closest('[data-action="fx-save"]');
+    if (save) {
+      const value = Number(document.getElementById("fx-input").value);
+      const el = document.getElementById("fx-status");
+      if (!Number.isFinite(value) || value <= 0) {
+        if (el) el.textContent = "환율은 0보다 큰 숫자로 입력해 주세요.";
+        return;
+      }
+      saveFxRate({ krw_per_usd: value, krw_per_usd_date: todayISO(), fetched_at: new Date().toISOString(), is_manual: true });
+      render();
+    }
+  });
+}
+
 function setDividendFormStatus(text) {
   const el = document.getElementById("dividend-form-status");
   if (el) el.textContent = text;
@@ -2877,6 +3017,8 @@ setupBulkSymbols();
 setupHoldingsView();
 setupAutoFill();
 setupBackfill();
+setupFxActions();
+setTimeout(ensureFxRate, 1500); // 앱을 연 직후 화면이 자리 잡은 다음 환율을 확인
 setupTransactionActions();
 setupDividendForm();
 setupDividendActions();
