@@ -2,3 +2,15 @@ Thumbs.db
 .DS_Store
 *.pyc
 __pycache__/
+
+# --- 공개 제외 (design/공개제외목록.md 와 일치시킬 것, 점검: py -3 tests/check_exclude.py) ---
+CLAUDE.md
+작업상태.md
+design/
+lib/
+tests/
+.claude/
+*백업*.json
+거래내역_*.csv
+.env
+*.key
