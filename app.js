@@ -1825,6 +1825,7 @@ function showScreen(id, options = {}) {
   });
 
   document.getElementById("screen-area").scrollTop = 0;
+  if (id === "settings" || id === MORE_SCREEN_ID) renderVersionInfo();
   try {
     localStorage.setItem(LAST_SCREEN_KEY, id);
   } catch (e) {
@@ -1857,6 +1858,35 @@ function setupNavigation() {
   }
   showScreen(first, { push: false });
   history.replaceState({ screen: currentScreenId() }, "", "#" + currentScreenId());
+}
+
+// 앱 버전과 오프라인 저장본(서비스 워커 캐시)의 버전을 화면에 보여 준다.
+// 둘이 다르면 옛 저장본이 남아 있다는 뜻이라 앱을 닫았다가 다시 열라고 안내한다.
+async function renderVersionInfo() {
+  document.querySelectorAll(".app-version-text").forEach((el) => {
+    el.textContent = `앱 버전 ${APP_VERSION} (${APP_BUILD_DATE})`;
+  });
+  const el = document.getElementById("app-cache-text");
+  if (!el) return;
+  const prefix = "stock-app-cache-";
+  if (!("caches" in window)) {
+    el.textContent = "오프라인 저장본: 이 주소(http)에서는 쓸 수 없습니다. https 주소나 localhost에서만 저장됩니다.";
+    return;
+  }
+  let keys = [];
+  try {
+    keys = (await caches.keys()).filter((k) => k.startsWith(prefix)).map((k) => k.slice(prefix.length));
+  } catch (e) {
+    el.textContent = "오프라인 저장본: 확인하지 못했습니다.";
+    return;
+  }
+  if (keys.length === 0) {
+    el.textContent = "오프라인 저장본: 아직 없음 (앱을 한 번 더 열면 저장됩니다)";
+  } else if (keys.length === 1 && keys[0] === APP_VERSION) {
+    el.textContent = `오프라인 저장본: ${APP_VERSION} (최신)`;
+  } else {
+    el.textContent = `오프라인 저장본: ${keys.join(", ")} — 앱 버전과 다릅니다. 앱을 닫았다가 다시 열어 주세요.`;
+  }
 }
 
 // 구분 버튼(.seg): 같은 카드 안의 .seg-panel 중 선택한 것만 보인다.

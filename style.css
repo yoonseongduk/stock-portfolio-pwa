@@ -754,3 +754,20 @@ details.help summary {
   color: #cbd5e1;
   line-height: 1.6;
 }
+
+/* 앱 정보(버전) */
+.about-card h3 {
+  margin: 0 0 6px;
+  font-size: 13px;
+  color: #94a3b8;
+  font-weight: 600;
+}
+
+.about-card p {
+  margin: 0 0 4px;
+}
+
+.version-footer {
+  text-align: center;
+  margin: 4px 0 0;
+}

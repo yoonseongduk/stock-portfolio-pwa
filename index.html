@@ -223,6 +223,11 @@
 
     <!-- 설정 (더보기) -->
     <section class="screen" data-screen="settings" hidden>
+      <div class="card about-card">
+        <h3>앱 정보</h3>
+        <p class="app-version-text"></p>
+        <p id="app-cache-text" class="hint-text"></p>
+      </div>
       <div class="card settings-card">
       <div class="field-row">
         <label class="grow">
@@ -254,11 +259,13 @@
       <div class="card">
         <ul id="more-list" class="menu-list"></ul>
       </div>
+      <p class="app-version-text hint-text version-footer"></p>
     </section>
   </main>
 
   <nav id="tab-bar" class="tab-bar" aria-label="화면 이동"></nav>
 
+  <script src="./version.js"></script>
   <script src="./app.js"></script>
 </body>
 </html>
