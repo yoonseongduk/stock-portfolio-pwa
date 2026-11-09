@@ -100,6 +100,7 @@
           </div>
           <input type="search" id="hv-query" placeholder="종목·섹터·시세 코드 검색" autocomplete="off" />
           <p id="hv-count" class="hint-text"></p>
+          <p id="auto-fill-status" class="hint-text"></p>
         </div>
         <div id="holdings-area">
           <p class="empty-message">아직 보유 중인 종목이 없습니다.</p>
@@ -129,7 +130,7 @@
         <div class="field-row">
           <label class="grow">
             종목명
-            <input type="text" name="stock_name" placeholder="예: 삼성전자" required />
+            <input type="text" name="stock_name" list="known-stock-names" placeholder="예: 삼성전자" required />
           </label>
           <label>
             매수/매도
@@ -189,7 +190,7 @@
         <div class="field-row">
           <label class="grow">
             종목명
-            <input type="text" name="stock_name" placeholder="예: 삼성전자" required />
+            <input type="text" name="stock_name" list="known-stock-names" placeholder="예: 삼성전자" required />
           </label>
           <label>
             <span id="dividend-amount-label">배당금액</span>
@@ -273,6 +274,7 @@
         <h3>앱 정보</h3>
         <p class="app-version-text"></p>
         <p id="app-cache-text" class="hint-text"></p>
+        <label class="check-row" title="시세 코드가 있고 거래소가 비어 있는 종목만, 하루에 한 번 조회합니다(현재가는 바꾸지 않음)"><input type="checkbox" id="auto-fill-toggle" /> 앱을 열 때 거래소를 자동으로 확인</label>
       </div>
       <div class="card settings-card">
       <div class="field-row">
@@ -310,6 +312,7 @@
   </main>
 
   <nav id="tab-bar" class="tab-bar" aria-label="화면 이동"></nav>
+  <datalist id="known-stock-names"></datalist>
 
   <script src="./version.js"></script>
   <script src="./app.js"></script>

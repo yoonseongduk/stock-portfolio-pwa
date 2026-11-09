@@ -885,6 +885,14 @@ function renderRank(holdings, prices) {
 // ===== 보유 종목 그룹·필터·검색·상세 (design/07_보유종목그룹.md) =====
 const STOCK_INFO_KEY = "stockInfo_v2"; // stock_info_map: holding_key -> { exchange_kind, sector_name }
 const HOLDINGS_VIEW_KEY = "stockHoldingsView_v1"; // holdings_view
+// 섹터 선택 목록의 기본값(특정 종목과 무관한 일반 분류). 사용자가 쓰는 섹터가 함께 나온다.
+const DEFAULT_SECTORS = [
+  "반도체", "2차전지", "자동차", "조선", "전력기기", "에너지", "화학·소재", "금융", "인터넷·플랫폼", "AI·소프트웨어",
+  "가전·전자", "물류", "로봇", "방산·철도", "기계·건설", "게임", "항공·우주", "바이오", "ETF", "핀테크",
+  "양자컴퓨팅", "유통·소비재", "통신", "헬스케어", "부동산·리츠",
+];
+const AUTO_FILL_KEY = "stockAutoFill_v1"; // is_auto_fill_enabled ("false"면 끔)
+const INFO_CHECK_KEY = "stockInfoChecked_v1"; // exchange_checked_map: holding_key -> 거래소를 확인해 본 날짜
 const EXCHANGE_LABEL = { kospi: "코스피", kosdaq: "코스닥", konex: "코넥스", nasdaq: "나스닥", nyse: "NYSE", other: "기타" };
 const DEFAULT_HOLDINGS_VIEW = {
   market_filter: "all", // all | kr | us
@@ -1058,6 +1066,12 @@ function groupTotalsText(rows) {
     .join(" · ");
 }
 
+// 섹터 선택 목록: 미분류 / 섹터들 / 새 섹터 입력
+function sectorOptionsHtml(choices, current) {
+  const options = choices.map((n) => `<option value="${escapeHtml(n)}" ${n === current ? "selected" : ""}>${escapeHtml(n)}</option>`).join("");
+  return `<option value="" ${current ? "" : "selected"}>미분류</option>${options}<option value="__new">＋ 새 섹터 입력…</option>`;
+}
+
 function holdingRowHtml(r, ctx) {
   const key = escapeHtml(r.key);
   const market = r.h.market_kind;
@@ -1121,7 +1135,10 @@ function holdingRowHtml(r, ctx) {
         </div>
         <div class="holding-item-price-row">
           <span>섹터</span>
-          <input class="info-input" type="text" list="sector-list" data-action="sector-input" data-key="${key}" value="${escapeHtml(r.sector_name)}" placeholder="예: 반도체" />
+          <span class="sector-edit">
+            <select class="info-select" data-action="sector-select" data-key="${key}">${sectorOptionsHtml(ctx.sectorChoices, r.sector_name)}</select>
+            <input class="info-input" type="text" list="sector-list" data-action="sector-input" data-key="${key}" placeholder="새 섹터 이름" hidden />
+          </span>
         </div>
         <div class="holding-item-detail"><span>${MARKET_LABEL[market]} 비중 ${share}%</span></div>
         <div class="hd-section">
@@ -1185,7 +1202,10 @@ function renderHoldings(holdings, prices, symbols, info = {}, transactions = [],
     dividendByKey[k].count += 1;
     dividendByKey[k].total += d.dividend_amount;
   });
-  const ctx = { marketTotals, tradesByKey, dividendByKey };
+  const sectorChoices = [...new Set([...DEFAULT_SECTORS, ...allRows.map((r) => r.sector_name).filter(Boolean)])].sort((a, b) =>
+    a.localeCompare(b, "ko")
+  );
+  const ctx = { marketTotals, tradesByKey, dividendByKey, sectorChoices };
 
   const groups = groupHoldingRows(rows, holdingsView);
   const sectorOptions = [...new Set(allRows.map((r) => r.sector_name).filter(Boolean))]
@@ -1207,6 +1227,155 @@ function renderHoldings(holdings, prices, symbols, info = {}, transactions = [],
       </details>`
           )
           .join(""));
+}
+
+// ===== 자동 채우기 (design/07_보유종목그룹.md §3-1) =====
+function loadAutoFillEnabled() {
+  try {
+    return localStorage.getItem(AUTO_FILL_KEY) !== "false";
+  } catch (e) {
+    return true;
+  }
+}
+
+// 이름 규칙으로 섹터를 알 수 있는 경우: ① 이름에 ETF ② 우선주(...우, ...우B)는 보통주의 섹터
+function inferSectorName(name, sectorByName) {
+  if (/ETF/i.test(name)) return "ETF";
+  const m = name.match(/^(.*?)우[A-Z]?$/);
+  if (m && m[1] && sectorByName[m[1]]) return sectorByName[m[1]];
+  return "";
+}
+
+// 한 번도 분류한 적 없는(종목정보가 없는) 보유 종목에만 채운다. 사용자가 정한 값은 건드리지 않는다.
+function autoFillSectors(holdings) {
+  const info = loadStockInfo();
+  const sectorByName = {};
+  Object.entries(info).forEach(([key, v]) => {
+    if (v.sector_name) sectorByName[splitHoldingKey(key).stock_name] = v.sector_name;
+  });
+  let changed = false;
+  holdings.forEach((h) => {
+    const key = holdingKey(h.market_kind, h.stock_name);
+    if (info[key]) return;
+    const sector = inferSectorName(h.stock_name, sectorByName);
+    if (!sector) return;
+    info[key] = { sector_name: sector };
+    sectorByName[h.stock_name] = sector;
+    changed = true;
+  });
+  if (changed) saveStockInfo(info);
+  return changed;
+}
+
+function renderKnownStockNames(transactions) {
+  const el = document.getElementById("known-stock-names");
+  if (!el) return;
+  const names = [...new Set([...transactions.map((t) => t.stock_name), ...loadDividends().map((d) => d.stock_name)])].sort((a, b) =>
+    a.localeCompare(b, "ko")
+  );
+  el.innerHTML = names.map((n) => `<option value="${escapeHtml(n)}"></option>`).join("");
+}
+
+// 이미 알고 있는 종목명이 한 시장에만 있으면 구분(국내/미국)을 자동으로 맞춘다.
+function setupNameAutoFill() {
+  document.querySelectorAll('#transaction-form [name="stock_name"], #dividend-form [name="stock_name"]').forEach((input) => {
+    input.addEventListener("change", () => {
+      const name = input.value.trim();
+      const kinds = new Set([
+        ...loadTransactions().filter((t) => t.stock_name === name).map((t) => t.market_kind),
+        ...loadDividends().filter((d) => d.stock_name === name).map((d) => d.market_kind),
+      ]);
+      if (kinds.size !== 1) return;
+      const form = input.form;
+      form.querySelector('[name="market_kind"]').value = [...kinds][0];
+      if (form.id === "dividend-form") updateDividendCurrencyFields(form);
+    });
+  });
+}
+
+function loadInfoChecked() {
+  try {
+    return JSON.parse(localStorage.getItem(INFO_CHECK_KEY) || "{}");
+  } catch (e) {
+    return {};
+  }
+}
+
+// 종목의 거래소(시장구분)만 읽는다. 현재가·히스토리는 저장하지 않는다.
+async function fetchExchangeKind(marketKind, symbol) {
+  if (marketKind === "kr") {
+    const list = await fetchDataGoKrItems(loadKrApiKey(), { likeSrtnCd: symbol }, 10, "시장구분 조회에 실패했습니다.");
+    return list.length ? normalizeExchangeKind(list[0].mrktCtg) : "";
+  }
+  const params = new URLSearchParams({ symbol, apikey: loadApiKey() });
+  const res = await fetch(`https://api.twelvedata.com/quote?${params.toString()}`);
+  const data = await res.json();
+  if (data.status === "error" || data.code) throw rateLimitAwareError(data, "시장구분 조회에 실패했습니다.");
+  return normalizeExchangeKind(data.exchange);
+}
+
+function setAutoFillStatus(text) {
+  const el = document.getElementById("auto-fill-status");
+  if (el) el.textContent = text;
+}
+
+let autoFillRunning = false;
+
+// 시세 코드가 있고 거래소가 비어 있는 종목의 거래소를 백그라운드로 채운다(종목마다 하루 1번만 시도).
+async function autoFillExchanges() {
+  if (autoFillRunning || !loadAutoFillEnabled()) return;
+  const busy = ["refresh-all-btn", "bulk-symbol-btn"].some((id) => document.getElementById(id)?.disabled);
+  if (busy) return; // 다른 시세 조회가 한창이면 한도를 같이 쓰므로 양보한다
+  const symbols = loadSymbols();
+  const info = loadStockInfo();
+  const checked = loadInfoChecked();
+  const today = todayISO();
+  const targets = computeHoldings(loadTransactions()).filter((h) => {
+    const key = holdingKey(h.market_kind, h.stock_name);
+    const hasKey = h.market_kind === "kr" ? loadKrApiKey() : loadApiKey();
+    return hasKey && symbols[key] && !(info[key] && info[key].exchange_kind) && checked[key] !== today;
+  });
+  if (targets.length === 0) return;
+
+  autoFillRunning = true;
+  let filled = 0;
+  try {
+    for (let i = 0; i < targets.length; i++) {
+      const h = targets[i];
+      const key = holdingKey(h.market_kind, h.stock_name);
+      setAutoFillStatus(`거래소 자동 확인 중... (${i + 1}/${targets.length}) ${h.stock_name}`);
+      try {
+        const exchange = await fetchExchangeKind(h.market_kind, symbols[key]);
+        checked[key] = today;
+        localStorage.setItem(INFO_CHECK_KEY, JSON.stringify(checked));
+        if (exchange && updateStockInfo(key, { exchange_kind: exchange }, { onlyIfEmpty: true })) filled++;
+      } catch (e) {
+        if (e.rate_limited) break; // 분당 한도: 이번 회차는 멈추고 다음에 다시 시도한다
+        checked[key] = today; // 그 밖의 오류는 오늘은 다시 시도하지 않는다
+        localStorage.setItem(INFO_CHECK_KEY, JSON.stringify(checked));
+      }
+      if (i < targets.length - 1) await sleep(REFRESH_GAP_MS[h.market_kind] ?? 0);
+    }
+  } finally {
+    autoFillRunning = false;
+  }
+  setAutoFillStatus(filled > 0 ? `거래소 ${filled}종목을 자동으로 채웠습니다.` : "");
+  if (filled > 0) renderHoldingsOnly();
+}
+
+function setupAutoFill() {
+  const toggle = document.getElementById("auto-fill-toggle");
+  toggle.checked = loadAutoFillEnabled();
+  toggle.addEventListener("change", () => {
+    try {
+      localStorage.setItem(AUTO_FILL_KEY, String(toggle.checked));
+    } catch (e) {
+      // 저장소를 못 쓰는 환경이면 건너뛴다
+    }
+    if (toggle.checked) autoFillExchanges();
+  });
+  setupNameAutoFill();
+  setTimeout(autoFillExchanges, 2000); // 앱을 연 직후 화면이 자리 잡은 다음 백그라운드로 확인
 }
 
 // 보유 화면만 다시 그린다(검색·필터를 바꿀 때).
@@ -1355,6 +1524,8 @@ function render() {
   const prices = loadPrices();
   const symbols = loadSymbols();
   const holdings = computeHoldings(transactions);
+  autoFillSectors(holdings); // 분류한 적 없는 종목에 이름 규칙으로 섹터를 채운다
+  renderKnownStockNames(transactions);
 
   renderDashboard(holdings, prices);
   renderShare(holdings, prices);
@@ -1527,6 +1698,21 @@ function setupHoldingsActions() {
       const symbols = loadSymbols();
       symbols[key] = symbolInput.value.trim();
       saveSymbols(symbols);
+      autoFillExchanges();
+      return;
+    }
+
+    const sectorSelect = event.target.closest('[data-action="sector-select"]');
+    if (sectorSelect) {
+      if (sectorSelect.value === "__new") {
+        // 새 섹터 이름을 적을 입력 칸을 보여 준다
+        const input = sectorSelect.parentElement.querySelector('[data-action="sector-input"]');
+        input.hidden = false;
+        input.focus();
+        return;
+      }
+      updateStockInfo(sectorSelect.dataset.key, { sector_name: sectorSelect.value });
+      render();
       return;
     }
 
@@ -2004,6 +2190,7 @@ async function handleCsvImportFile(file) {
   saveTransactions(transactions);
   saveSymbols(symbols);
   render();
+  autoFillExchanges();
 
   const summary =
     `${added}줄 가져옴` +
@@ -2452,6 +2639,7 @@ setupHoldingsActions();
 setupRefreshAll();
 setupBulkSymbols();
 setupHoldingsView();
+setupAutoFill();
 setupTransactionActions();
 setupDividendForm();
 setupDividendActions();
