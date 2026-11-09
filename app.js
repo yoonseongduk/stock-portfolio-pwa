@@ -508,7 +508,9 @@ async function lookupSymbolUs(apiKey, name) {
   }
   const list = Array.isArray(data.data) ? data.data : [];
   if (list.length === 0) {
-    throw new Error("이름으로 찾은 종목이 없습니다.");
+    throw new Error(
+      "이름으로 찾은 종목이 없습니다. 미국 종목은 영문 이름이나 티커로 찾습니다. 한글 이름이면 시세 코드 칸에 티커(예: GOOGL)를 직접 입력해 주세요."
+    );
   }
 
   const usExchanges = ["NASDAQ", "NYSE", "AMEX"];
