@@ -861,6 +861,12 @@ function renderTransactions(transactions) {
     .join("");
 }
 
+// 원화로 입력한 미국 배당이면 "원화 13,380원 ÷ 환율 1,338" 설명을 붙인다.
+function dividendKrwNote(d) {
+  if (d.dividend_amount_krw === undefined) return "";
+  return ` · 원화 ${Math.round(d.dividend_amount_krw).toLocaleString("ko-KR")}원 ÷ 환율 ${Number(d.krw_per_usd).toLocaleString("ko-KR")}`;
+}
+
 function renderDividends(dividends) {
   const summaryArea = document.getElementById("dividend-summary");
   const listArea = document.getElementById("dividend-area");
@@ -897,7 +903,7 @@ function renderDividends(dividends) {
         <div class="tx-item" data-id="${d.dividend_id}">
           <div class="tx-item-main">
             <span class="tx-item-date">${d.dividend_date}</span>
-            <span>${d.stock_name} (${MARKET_LABEL[d.market_kind]}) · ${formatMoney(d.dividend_amount, d.market_kind)}</span>
+            <span>${d.stock_name} (${MARKET_LABEL[d.market_kind]}) · ${formatMoney(d.dividend_amount, d.market_kind)}${dividendKrwNote(d)}</span>
           </div>
           <button class="delete-btn" data-action="delete-dividend">삭제</button>
         </div>
@@ -1092,10 +1098,27 @@ function setupTransactionActions() {
   });
 }
 
+// 미국 배당일 때만 '입력 통화'를 보이고, 원화를 고르면 환율 칸을 보인다.
+function updateDividendCurrencyFields(form) {
+  const isUs = form.querySelector('[name="market_kind"]').value === "us";
+  const isKrw = isUs && form.querySelector('[name="currency_kind"]').value === "krw";
+  document.getElementById("dividend-currency-row").hidden = !isUs;
+  document.getElementById("dividend-rate-label").hidden = !isKrw;
+  document.getElementById("dividend-amount-label").textContent = isKrw ? "배당금액(원)" : isUs ? "배당금액($)" : "배당금액";
+}
+
+function setDividendFormStatus(text) {
+  const el = document.getElementById("dividend-form-status");
+  if (el) el.textContent = text;
+}
+
 function setupDividendForm() {
   const form = document.getElementById("dividend-form");
   const dateInput = form.querySelector('input[name="dividend_date"]');
   dateInput.value = todayISO();
+  updateDividendCurrencyFields(form);
+  form.querySelector('[name="market_kind"]').addEventListener("change", () => updateDividendCurrencyFields(form));
+  form.querySelector('[name="currency_kind"]').addEventListener("change", () => updateDividendCurrencyFields(form));
 
   form.addEventListener("submit", (event) => {
     event.preventDefault();
@@ -1104,14 +1127,28 @@ function setupDividendForm() {
     const stock_name = String(formData.get("stock_name")).trim();
     if (!stock_name) return;
 
+    const market_kind = formData.get("market_kind");
+    const inputAmount = Number(formData.get("dividend_amount"));
     const newDividend = {
       dividend_id: makeId(),
       dividend_date: String(formData.get("dividend_date")) || todayISO(),
-      market_kind: formData.get("market_kind"),
+      market_kind,
       stock_name,
-      dividend_amount: Number(formData.get("dividend_amount")),
+      dividend_amount: inputAmount,
       sequence_no: Date.now(),
     };
+
+    // 미국 배당을 원화로 입력하면 환율로 달러를 계산해 저장하고, 원화 금액과 환율은 참고로 남긴다.
+    if (market_kind === "us" && formData.get("currency_kind") === "krw") {
+      const krwPerUsd = Number(formData.get("krw_per_usd"));
+      if (!Number.isFinite(inputAmount) || inputAmount <= 0 || !Number.isFinite(krwPerUsd) || krwPerUsd <= 0) {
+        setDividendFormStatus("원화로 입력하려면 배당금액(원)과 그날 환율(1달러당 원)을 0보다 크게 입력해 주세요.");
+        return;
+      }
+      newDividend.dividend_amount = Math.round((inputAmount / krwPerUsd) * 100) / 100;
+      newDividend.dividend_amount_krw = inputAmount;
+      newDividend.krw_per_usd = krwPerUsd;
+    }
 
     const dividends = loadDividends();
     dividends.push(newDividend);
@@ -1119,6 +1156,8 @@ function setupDividendForm() {
 
     form.reset();
     dateInput.value = todayISO();
+    updateDividendCurrencyFields(form);
+    setDividendFormStatus("");
     renderDividends(loadDividends());
   });
 }
@@ -1202,9 +1241,18 @@ function buildTransactionsCsv(transactions, symbols) {
 }
 
 function buildDividendsCsv(dividends) {
-  const header = ["날짜", "구분", "종목명", "배당금액"];
+  const header = ["날짜", "구분", "종목명", "배당금액", "원화금액", "환율"];
   const rows = dividends.map((d) =>
-    [d.dividend_date, MARKET_LABEL[d.market_kind], d.stock_name, d.dividend_amount].map(csvEscape).join(",")
+    [
+      d.dividend_date,
+      MARKET_LABEL[d.market_kind],
+      d.stock_name,
+      d.dividend_amount,
+      d.dividend_amount_krw ?? "",
+      d.krw_per_usd ?? "",
+    ]
+      .map(csvEscape)
+      .join(",")
   );
   return [header.join(","), ...rows].join("\r\n");
 }
@@ -1357,9 +1405,11 @@ async function handleDividendCsvImportFile(file) {
     const lineNo = idx + 2; // 머리글 포함 실제 줄 번호
     if (cols.every((c) => c.trim() === "")) return; // 빈 줄은 조용히 건너뜀
 
-    const [date, marketLabel, name, amountStr] = cols;
+    const [date, marketLabel, name, amountStr, krwStr, rateStr] = cols;
     const market_kind = marketFromLabel[(marketLabel || "").trim()];
     const amount = Number(amountStr);
+    const hasKrw = (krwStr || "").trim() !== "";
+    const hasRate = (rateStr || "").trim() !== "";
 
     if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date.trim())) {
       errors.push(`${lineNo}줄: 날짜 형식 오류(YYYY-MM-DD)`);
@@ -1378,20 +1428,36 @@ async function handleDividendCsvImportFile(file) {
       return;
     }
 
+    if (hasKrw !== hasRate) {
+      errors.push(`${lineNo}줄: 원화금액과 환율은 둘 다 쓰거나 둘 다 비워야 함`);
+      return;
+    }
+    const krw = Number(krwStr);
+    const rate = Number(rateStr);
+    if (hasKrw && (market_kind !== "us" || !Number.isFinite(krw) || krw <= 0 || !Number.isFinite(rate) || rate <= 0)) {
+      errors.push(`${lineNo}줄: 원화금액·환율은 미국 배당에만, 0보다 큰 숫자로`);
+      return;
+    }
+
     const key = [date.trim(), market_kind, name.trim(), amount].join("|");
     if (existing.has(key)) {
       skippedSame++;
       return;
     }
 
-    dividends.push({
+    const newDividend = {
       dividend_id: makeId(),
       dividend_date: date.trim(),
       market_kind,
       stock_name: name.trim(),
       dividend_amount: amount,
       sequence_no: Date.now() + added,
-    });
+    };
+    if (hasKrw) {
+      newDividend.dividend_amount_krw = krw;
+      newDividend.krw_per_usd = rate;
+    }
+    dividends.push(newDividend);
     added++;
   });
 

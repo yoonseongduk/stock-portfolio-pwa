@@ -99,7 +99,8 @@ main {
   font-size: 14px;
 }
 
-#holding-form button {
+#transaction-form button,
+#dividend-form button {
   width: 100%;
   padding: 12px;
   background-color: #16a34a;
@@ -110,7 +111,8 @@ main {
   font-weight: 600;
 }
 
-#holding-form button:active {
+#transaction-form button:active,
+#dividend-form button:active {
   background-color: #15803d;
 }
 
@@ -720,4 +722,15 @@ details.help summary {
 
 .tx-item-main {
   word-break: keep-all;
+}
+
+/* 입력 칸이 카드 밖으로 넘치지 않게 (폰 폭) */
+.field-row label {
+  min-width: 0;
+}
+
+.field-row input,
+.field-row select {
+  width: 100%;
+  min-width: 0;
 }
