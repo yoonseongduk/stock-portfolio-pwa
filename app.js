@@ -1405,6 +1405,133 @@ function setupDataManagement() {
   });
 }
 
+// ===== 화면 틀 (design/02_화면구조.md) =====
+// 화면 목록 SCREENS 가 유일한 원본이다. 아래쪽 탭과 '더보기' 메뉴는 이 목록으로 자동으로 만들어진다.
+// 새 기능: ① index.html 에 <section class="screen" data-screen="새id" hidden> 를 만들고
+//          ② SCREENS 에 한 줄을 추가한다. (기본은 '더보기'에 나타남. pinned: true 로 올리면 탭 후보)
+const MAX_TAB_SLOTS = 4; // 아래쪽 탭 칸 수('더보기' 포함). 탭 후보는 앞에서부터 MAX_TAB_SLOTS - 1 개만 탭이 된다.
+const MORE_SCREEN_ID = "more";
+const LAST_SCREEN_KEY = "stockLastScreen_v1";
+const SCREENS = [
+  { id: "home", label: "현황", icon: "📊", pinned: true },
+  { id: "holdings", label: "보유", icon: "💼", pinned: true },
+  { id: "trades", label: "거래", icon: "🧾", pinned: true },
+  { id: "dividends", label: "배당 기록", icon: "💰" },
+  { id: "data", label: "데이터 관리", icon: "💾" },
+  { id: "settings", label: "설정", icon: "⚙️" },
+];
+
+function getTabScreens() {
+  return SCREENS.filter((s) => s.pinned).slice(0, MAX_TAB_SLOTS - 1);
+}
+
+function getMoreScreens() {
+  const tabIds = new Set(getTabScreens().map((s) => s.id));
+  return SCREENS.filter((s) => !tabIds.has(s.id));
+}
+
+function currentScreenId() {
+  const el = [...document.querySelectorAll(".screen")].find((x) => !x.hidden);
+  return el ? el.dataset.screen : null;
+}
+
+// 탭 바와 더보기 목록을 SCREENS 로 다시 만든다.
+function renderNavigation() {
+  const tabs = getTabScreens();
+  const tabHtml = tabs
+    .map(
+      (s) => `<button type="button" class="tab-btn" data-screen-go="${s.id}" data-tab="${s.id}">
+        <span class="tab-icon">${s.icon}</span><span>${s.label}</span></button>`
+    )
+    .join("");
+  document.getElementById("tab-bar").innerHTML =
+    tabHtml +
+    `<button type="button" class="tab-btn" data-screen-go="${MORE_SCREEN_ID}" data-tab="${MORE_SCREEN_ID}">
+      <span class="tab-icon">☰</span><span>더보기</span></button>`;
+
+  document.getElementById("more-list").innerHTML = getMoreScreens()
+    .map(
+      (s) => `<li><button type="button" class="menu-item" data-screen-go="${s.id}">
+        <span>${s.icon}</span><span>${s.label}</span><span class="menu-arrow">›</span></button></li>`
+    )
+    .join("");
+}
+
+function showScreen(id, options = {}) {
+  const { push = true } = options;
+  const known = id === MORE_SCREEN_ID || SCREENS.some((s) => s.id === id);
+  if (!known) id = SCREENS[0].id; // 알 수 없는 화면은 첫 화면으로
+
+  document.querySelectorAll(".screen").forEach((el) => {
+    el.hidden = el.dataset.screen !== id;
+  });
+  const screen = SCREENS.find((s) => s.id === id);
+  document.getElementById("screen-title").textContent = id === MORE_SCREEN_ID ? "더보기" : screen.label;
+
+  const tabIds = getTabScreens().map((s) => s.id);
+  const activeTab = tabIds.includes(id) ? id : MORE_SCREEN_ID; // 탭에 없는 화면이면 '더보기' 탭을 선택 상태로
+  document.querySelectorAll("#tab-bar .tab-btn").forEach((b) => {
+    b.classList.toggle("active", b.dataset.tab === activeTab);
+  });
+
+  document.getElementById("screen-area").scrollTop = 0;
+  try {
+    localStorage.setItem(LAST_SCREEN_KEY, id);
+  } catch (e) {
+    // 저장소를 못 쓰는 환경이면 기억만 건너뛴다
+  }
+  if (push && location.hash !== "#" + id) {
+    history.pushState({ screen: id }, "", "#" + id);
+  }
+}
+
+function setupNavigation() {
+  renderNavigation();
+
+  document.addEventListener("click", (event) => {
+    const go = event.target.closest("[data-screen-go]");
+    if (go) showScreen(go.dataset.screenGo);
+  });
+  // 폰의 뒤로가기: 앱이 꺼지지 않고 이전 화면으로 돌아간다.
+  window.addEventListener("popstate", () => {
+    showScreen(location.hash.slice(1), { push: false });
+  });
+
+  let first = location.hash.slice(1); // 주소가 우선, 없으면 마지막으로 본 화면
+  if (!first) {
+    try {
+      first = localStorage.getItem(LAST_SCREEN_KEY) || "";
+    } catch (e) {
+      first = "";
+    }
+  }
+  showScreen(first, { push: false });
+  history.replaceState({ screen: currentScreenId() }, "", "#" + currentScreenId());
+}
+
+// 구분 버튼(.seg): 같은 카드 안의 .seg-panel 중 선택한 것만 보인다.
+function setupSegments() {
+  document.querySelectorAll(".seg").forEach((seg) => {
+    seg.addEventListener("click", (event) => {
+      const btn = event.target.closest(".seg-btn");
+      if (!btn) return;
+      seg.querySelectorAll(".seg-btn").forEach((b) => b.classList.toggle("active", b === btn));
+      seg.parentElement.querySelectorAll(":scope > .seg-panel").forEach((panel) => {
+        panel.hidden = panel.id !== btn.dataset.segTarget;
+      });
+    });
+  });
+}
+
+// '＋ 추가' 패널(details.add-panel): 저장하면 자동으로 접는다.
+function setupAddPanels() {
+  document.querySelectorAll("details.add-panel form").forEach((form) => {
+    form.addEventListener("submit", () => {
+      form.closest("details").open = false;
+    });
+  });
+}
+
 migrateLegacyDataIfNeeded();
 migrateOldHoldingsIfNeeded();
 setupSettings();
@@ -1416,6 +1543,9 @@ setupDividendForm();
 setupDividendActions();
 setupDataManagement();
 render();
+setupSegments();
+setupAddPanels();
+setupNavigation();
 
 // 서비스 워커 등록 (Sprint 0부터 유지)
 // + 자동 업데이트: 앱을 열 때마다 새 버전이 있는지 확인하고, 새 버전이 설치되면
