@@ -363,6 +363,13 @@ function calc(h, currentPrice) {
 // (조사 결과: 야후 파이낸스·네이버 금융·Stooq·공용 CORS 프록시는 브라우저
 //  직접 호출이 막히거나 무가입으로는 못 쓴다.)
 
+// Twelve Data 오류 응답을 Error 로 만든다. code 가 429 면 "분당 한도"라서 rate_limited 로 표시한다.
+function rateLimitAwareError(data, fallbackMessage) {
+  const err = new Error(data.message || fallbackMessage);
+  err.rate_limited = Number(data.code) === 429;
+  return err;
+}
+
 // 미국: Twelve Data — 브라우저 직접 호출 허용, 거의 실시간가.
 // /quote 엔드포인트를 쓰면 현재가(close)뿐 아니라 시가·고가·저가·거래량도
 // 같은 호출 한 번으로 받을 수 있다(트렌드 분석용 히스토리에 함께 저장).
@@ -372,7 +379,7 @@ async function fetchPriceTwelveData(apiKey, symbol) {
   const data = await res.json();
 
   if (data.status === "error" || data.code) {
-    throw new Error(data.message || "시세 조회에 실패했습니다.");
+    throw rateLimitAwareError(data, "시세 조회에 실패했습니다.");
   }
   const current_price = Number(data.close);
   if (!Number.isFinite(current_price)) {
@@ -499,7 +506,7 @@ async function lookupSymbolUs(apiKey, name) {
   const data = await res.json();
 
   if (data.status === "error" || data.code) {
-    throw new Error(data.message || "종목코드 검색에 실패했습니다.");
+    throw rateLimitAwareError(data, "종목코드 검색에 실패했습니다.");
   }
   const list = Array.isArray(data.data) ? data.data : [];
   if (list.length === 0) {
@@ -553,7 +560,17 @@ async function findMissingSymbols() {
     const h = targets[i];
     setFetchStatus(`시세 코드 찾는 중... (${i + 1}/${targets.length}) ${h.stock_name}`);
     try {
-      const r = await lookupSymbolDetail(h.market_kind, h.stock_name);
+      let r;
+      try {
+        r = await lookupSymbolDetail(h.market_kind, h.stock_name);
+      } catch (e) {
+        if (!e.rate_limited) throw e;
+        await waitWithCountdown(
+          RATE_LIMIT_WAIT_MS,
+          (sec) => `미국 시세 분당 한도에 걸려 ${sec}초 기다린 뒤 ${h.stock_name} 코드를 다시 찾습니다 (${i + 1}/${targets.length})`
+        );
+        r = await lookupSymbolDetail(h.market_kind, h.stock_name);
+      }
       if (r.exact) {
         const latest = loadSymbols(); // 중간에 사용자가 바꾼 값을 덮어쓰지 않게 매번 다시 읽는다
         latest[holdingKey(h.market_kind, h.stock_name)] = r.symbol_code;
@@ -628,12 +645,27 @@ async function fetchAndUpdatePrice(marketKind, stockName) {
     appendPriceHistory(key, price_date, { open_price, high_price, low_price, close_price: current_price, trade_volume });
     return { ok: true, current_price, price_date };
   } catch (e) {
-    return { ok: false, message: e.message };
+    // 분당 한도 오류는 영어 원문이 길어서 짧은 한글로 바꿔 보여 준다.
+    const message = e.rate_limited ? "분당 한도(8회)를 넘었습니다" : e.message;
+    return { ok: false, message, rate_limited: Boolean(e.rate_limited) };
   }
 }
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// 전체 시세 새로고침 간격(ms) (design/04_전체시세새로고침.md). 미국(Twelve Data 무료 플랜)은 분당 8회 제한이라 8초.
+const REFRESH_GAP_MS = { kr: 300, us: 8000 };
+let RATE_LIMIT_WAIT_MS = 62000; // 분당 한도 오류(429)가 나면 다음 분까지 기다렸다가 1번만 다시 시도한다(시험에서는 0으로 줄인다)
+
+// totalMs 동안 기다리며 남은 초를 makeText(남은 초)로 화면에 보여 준다.
+async function waitWithCountdown(totalMs, makeText) {
+  const end = Date.now() + totalMs;
+  while (Date.now() < end) {
+    setFetchStatus(makeText(Math.ceil((end - Date.now()) / 1000)));
+    await sleep(Math.min(1000, end - Date.now()));
+  }
 }
 
 function setFetchStatus(text) {
@@ -1126,7 +1158,10 @@ function setupRefreshAll() {
   const button = document.getElementById("refresh-all-btn");
 
   button.addEventListener("click", async () => {
-    const holdings = computeHoldings(loadTransactions());
+    // 국내(제한이 느슨함)를 먼저, 미국(분당 8회 제한)은 뒤에서 천천히 조회한다.
+    const holdings = [...computeHoldings(loadTransactions())].sort(
+      (a, b) => (a.market_kind === b.market_kind ? 0 : a.market_kind === "kr" ? -1 : 1)
+    );
     if (holdings.length === 0) {
       setFetchStatus("보유 중인 종목이 없습니다.");
       return;
@@ -1138,24 +1173,41 @@ function setupRefreshAll() {
     let successCount = 0;
     const failMessages = [];
 
-    for (let i = 0; i < holdings.length; i++) {
-      const h = holdings[i];
-      const result = await fetchAndUpdatePrice(h.market_kind, h.stock_name);
-      if (result.ok) {
-        successCount++;
-      } else {
-        failMessages.push(`${h.stock_name}: ${result.message}`);
-      }
-      setFetchStatus(`전체 종목 조회 중... (${i + 1}/${holdings.length})`);
-      await sleep(300); // Twelve Data 무료 플랜의 분당 호출 제한을 피하기 위한 최소 간격
-    }
+    try {
+      for (let i = 0; i < holdings.length; i++) {
+        const h = holdings[i];
+        let result = await fetchAndUpdatePrice(h.market_kind, h.stock_name);
+        if (!result.ok && result.rate_limited) {
+          // 분당 한도: 다음 분까지 기다렸다가 이 종목만 한 번 다시 조회한다.
+          await waitWithCountdown(
+            RATE_LIMIT_WAIT_MS,
+            (sec) => `미국 시세 분당 한도에 걸려 ${sec}초 기다린 뒤 ${h.stock_name}을(를) 다시 조회합니다 (${i + 1}/${holdings.length})`
+          );
+          result = await fetchAndUpdatePrice(h.market_kind, h.stock_name);
+        }
+        if (result.ok) {
+          successCount++;
+        } else {
+          failMessages.push(`${h.stock_name}: ${result.message}`);
+        }
 
-    button.disabled = false;
+        const usLeft = holdings.slice(i + 1).filter((x) => x.market_kind === "us").length;
+        const etaSec = Math.round((usLeft * REFRESH_GAP_MS.us) / 1000);
+        setFetchStatus(
+          `전체 종목 조회 중... (${i + 1}/${holdings.length})` +
+            (usLeft > 0 && REFRESH_GAP_MS.us > 0 ? ` · 미국 ${usLeft}종목 남음, 분당 8회 제한이라 약 ${etaSec}초` : "")
+        );
+        if (i < holdings.length - 1) await sleep(REFRESH_GAP_MS[h.market_kind] ?? 0);
+      }
+    } finally {
+      button.disabled = false;
+    }
     render();
 
+    // 실패가 많으면 화면이 길어지므로 3개까지만 보여 준다.
+    const shown = failMessages.slice(0, 3).join(", ") + (failMessages.length > 3 ? ` 외 ${failMessages.length - 3}개` : "");
     const summary =
-      `${successCount}개 종목 갱신 완료` +
-      (failMessages.length > 0 ? ` · 실패 ${failMessages.length}개 (${failMessages.join(", ")})` : "");
+      `${successCount}개 종목 갱신 완료` + (failMessages.length > 0 ? ` · 실패 ${failMessages.length}개 (${shown})` : "");
     setFetchStatus(summary);
   });
 }
