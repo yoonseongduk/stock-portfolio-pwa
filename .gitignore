@@ -14,3 +14,4 @@ tests/
 거래내역_*.csv
 .env
 *.key
+docs/계획서.md
