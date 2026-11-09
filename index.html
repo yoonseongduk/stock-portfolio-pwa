@@ -71,41 +71,41 @@
         <div class="field-row">
           <label>
             날짜
-            <input type="date" name="date" required />
+            <input type="date" name="trade_date" required />
           </label>
           <label>
             구분
-            <select name="market" required>
-              <option value="KR">국내</option>
-              <option value="US">미국</option>
+            <select name="market_kind" required>
+              <option value="kr">국내</option>
+              <option value="us">미국</option>
             </select>
           </label>
         </div>
         <div class="field-row">
           <label class="grow">
             종목명
-            <input type="text" name="name" placeholder="예: 삼성전자" required />
+            <input type="text" name="stock_name" placeholder="예: 삼성전자" required />
           </label>
           <label>
             매수/매도
-            <select name="type" required>
-              <option value="BUY">매수</option>
-              <option value="SELL">매도</option>
+            <select name="trade_kind" required>
+              <option value="buy">매수</option>
+              <option value="sell">매도</option>
             </select>
           </label>
         </div>
         <div class="field-row">
           <label>
             수량
-            <input type="number" name="qty" step="any" min="0" required />
+            <input type="number" name="trade_quantity" step="any" min="0" required />
           </label>
           <label>
             단가
-            <input type="number" name="price" step="any" min="0" required />
+            <input type="number" name="unit_price" step="any" min="0" required />
           </label>
           <label>
             수수료
-            <input type="number" name="fee" step="any" min="0" value="0" />
+            <input type="number" name="trade_fee" step="any" min="0" value="0" />
           </label>
         </div>
         <button type="submit">거래 추가</button>
@@ -141,24 +141,24 @@
         <div class="field-row">
           <label>
             날짜
-            <input type="date" name="date" required />
+            <input type="date" name="dividend_date" required />
           </label>
           <label>
             구분
-            <select name="market" required>
-              <option value="KR">국내</option>
-              <option value="US">미국</option>
+            <select name="market_kind" required>
+              <option value="kr">국내</option>
+              <option value="us">미국</option>
             </select>
           </label>
         </div>
         <div class="field-row">
           <label class="grow">
             종목명
-            <input type="text" name="name" placeholder="예: 삼성전자" required />
+            <input type="text" name="stock_name" placeholder="예: 삼성전자" required />
           </label>
           <label>
             배당금액
-            <input type="number" name="amount" step="any" min="0" required />
+            <input type="number" name="dividend_amount" step="any" min="0" required />
           </label>
         </div>
         <button type="submit">배당 추가</button>

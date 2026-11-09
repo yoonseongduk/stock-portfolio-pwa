@@ -1,16 +1,26 @@
 // Sprint 2: 매수/매도 거래내역을 입력하면 보유수량·평균단가를 자동 계산한다.
 // 데이터는 폰(브라우저) 안의 localStorage에만 저장된다. 서버로 전송하지 않음.
 
-const TX_KEY = "stockTransactions_v1";
-const PRICES_KEY = "stockCurrentPrices_v1";
-const SYMBOLS_KEY = "stockSymbols_v1"; // key: "market|name" -> 시세 조회용 코드(종목코드/티커)
-const API_KEY_KEY = "stockApiKey_v1"; // Twelve Data (미국)
-const KR_API_KEY_KEY = "stockKrApiKey_v1"; // 공공데이터포털 (국내)
-const PRICE_HISTORY_KEY = "stockPriceHistory_v1"; // 자동조회 결과를 날짜별로 누적(추후 추세 분석용)
-const DIVIDENDS_KEY = "stockDividends_v1";
+// 저장 형식은 design/01_저장데이터형식.md (v2, 표준 변수명)를 따른다.
+const TX_KEY = "stockTransactions_v2"; // trade_list
+const PRICES_KEY = "stockCurrentPrices_v2"; // current_price_map: holding_key -> current_price
+const SYMBOLS_KEY = "stockSymbols_v2"; // symbol_code_map: holding_key("market_kind|stock_name") -> 시세 조회용 코드(종목코드/티커)
+const API_KEY_KEY = "stockApiKey_v1"; // us_price_api_key: Twelve Data (미국)
+const KR_API_KEY_KEY = "stockKrApiKey_v1"; // kr_price_api_key: 공공데이터포털 (국내)
+const PRICE_HISTORY_KEY = "stockPriceHistory_v2"; // price_history_map: 자동조회 결과를 날짜별로 누적(추후 추세 분석용)
+const DIVIDENDS_KEY = "stockDividends_v2"; // dividend_list
+
+// v1 저장 키(옛 형식). 앱이 읽어서 v2로 변환만 하고, 지우거나 고치지 않는다.
+const LEGACY_TX_KEY = "stockTransactions_v1";
+const LEGACY_PRICES_KEY = "stockCurrentPrices_v1";
+const LEGACY_SYMBOLS_KEY = "stockSymbols_v1";
+const LEGACY_PRICE_HISTORY_KEY = "stockPriceHistory_v1";
+const LEGACY_DIVIDENDS_KEY = "stockDividends_v1";
 const OLD_HOLDINGS_KEY = "stockHoldings_v1"; // Sprint 1에서 쓰던 저장 키 (이전용)
 
-/** @typedef {{id:string, date:string, market:'KR'|'US', name:string, type:'BUY'|'SELL', qty:number, price:number, fee:number, seq:number}} Transaction */
+const BACKUP_VERSION = 2;
+
+/** @typedef {{trade_id:string, trade_date:string, market_kind:'kr'|'us', stock_name:string, trade_kind:'buy'|'sell', trade_quantity:number, unit_price:number, trade_fee:number, sequence_no:number}} Trade */
 
 function makeId() {
   if (window.crypto && typeof window.crypto.randomUUID === "function") {
@@ -25,13 +35,102 @@ function todayISO() {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
-function holdingKey(market, name) {
-  return `${market}|${name}`;
+function holdingKey(marketKind, stockName) {
+  return `${marketKind}|${stockName}`;
 }
+
+// ===== 데이터 형식 전환 BEGIN (v1 -> v2, 순수 함수만. tests/test_migration.js 가 이 구간을 꺼내 시험한다) =====
+const LEGACY_MARKET = { KR: "kr", US: "us" };
+const LEGACY_TRADE = { BUY: "buy", SELL: "sell" };
+
+// "KR|삼성전자" -> "kr|삼성전자". 이미 v2 형식이면 그대로 둔다.
+function convertLegacyHoldingKey(key) {
+  const sep = key.indexOf("|");
+  if (sep < 0) return key;
+  const mapped = LEGACY_MARKET[key.slice(0, sep)];
+  return mapped ? `${mapped}|${key.slice(sep + 1)}` : key;
+}
+
+function convertLegacyTrade(t) {
+  if (t.trade_id !== undefined) return t; // 이미 v2
+  return {
+    trade_id: t.id,
+    trade_date: t.date,
+    market_kind: LEGACY_MARKET[t.market] || t.market,
+    stock_name: t.name,
+    trade_kind: LEGACY_TRADE[t.type] || t.type,
+    trade_quantity: t.qty,
+    unit_price: t.price,
+    trade_fee: t.fee || 0,
+    sequence_no: t.seq,
+  };
+}
+
+function convertLegacyDividend(d) {
+  if (d.dividend_id !== undefined) return d; // 이미 v2
+  return {
+    dividend_id: d.id,
+    dividend_date: d.date,
+    market_kind: LEGACY_MARKET[d.market] || d.market,
+    stock_name: d.name,
+    dividend_amount: d.amount,
+    sequence_no: d.seq,
+  };
+}
+
+function convertLegacyPriceEntry(e) {
+  if (e.price_date !== undefined) return e; // 이미 v2
+  return {
+    price_date: e.date,
+    open_price: e.open,
+    high_price: e.high,
+    low_price: e.low,
+    close_price: e.close,
+    trade_volume: e.volume,
+  };
+}
+
+// holding_key 로 묶인 맵(현재가, 시세 코드)의 키만 바꾼다.
+function convertLegacyKeyMap(map) {
+  const out = {};
+  Object.keys(map).forEach((k) => {
+    out[convertLegacyHoldingKey(k)] = map[k];
+  });
+  return out;
+}
+
+function convertLegacyPriceHistoryMap(map) {
+  const out = {};
+  Object.keys(map).forEach((k) => {
+    const list = Array.isArray(map[k]) ? map[k] : [];
+    out[convertLegacyHoldingKey(k)] = list.map(convertLegacyPriceEntry);
+  });
+  return out;
+}
+
+// 백업 파일(v1 또는 v2)을 v2 형식으로 맞춘다. 파일에 없는 항목은 undefined 로 둔다(가져올 때 건너뜀).
+function convertBackup(data) {
+  if (data.backup_version >= 2) return data;
+  const meta = data._meta || {};
+  return {
+    backup_app_name: meta.app || "주식현황관리",
+    exported_at: meta.exportedAt,
+    backup_version: BACKUP_VERSION,
+    trade_list: Array.isArray(data.transactions) ? data.transactions.map(convertLegacyTrade) : undefined,
+    current_price_map: data.prices && typeof data.prices === "object" ? convertLegacyKeyMap(data.prices) : undefined,
+    symbol_code_map: data.symbols && typeof data.symbols === "object" ? convertLegacyKeyMap(data.symbols) : undefined,
+    price_history_map:
+      data.priceHistory && typeof data.priceHistory === "object" ? convertLegacyPriceHistoryMap(data.priceHistory) : undefined,
+    dividend_list: Array.isArray(data.dividends) ? data.dividends.map(convertLegacyDividend) : undefined,
+    us_price_api_key: typeof data.apiKey === "string" ? data.apiKey : undefined,
+    kr_price_api_key: typeof data.krApiKey === "string" ? data.krApiKey : undefined,
+  };
+}
+// ===== 데이터 형식 전환 END =====
 
 // --- 저장소 ---
 
-/** @returns {Transaction[]} */
+/** @returns {Trade[]} */
 function loadTransactions() {
   const raw = localStorage.getItem(TX_KEY);
   if (!raw) return [];
@@ -43,12 +142,12 @@ function loadTransactions() {
   }
 }
 
-/** @param {Transaction[]} transactions */
+/** @param {Trade[]} transactions */
 function saveTransactions(transactions) {
   localStorage.setItem(TX_KEY, JSON.stringify(transactions));
 }
 
-/** @returns {Record<string, number>} key: "market|name" -> 현재가 */
+/** @returns {Record<string, number>} holding_key -> current_price */
 function loadPrices() {
   const raw = localStorage.getItem(PRICES_KEY);
   if (!raw) return {};
@@ -64,7 +163,7 @@ function savePrices(prices) {
   localStorage.setItem(PRICES_KEY, JSON.stringify(prices));
 }
 
-/** @returns {Record<string, string>} key: "market|name" -> 시세 조회 코드 */
+/** @returns {Record<string, string>} holding_key -> symbol_code */
 function loadSymbols() {
   const raw = localStorage.getItem(SYMBOLS_KEY);
   if (!raw) return {};
@@ -96,7 +195,7 @@ function saveKrApiKey(key) {
   localStorage.setItem(KR_API_KEY_KEY, key);
 }
 
-/** @returns {Record<string, {date:string, open:number, high:number, low:number, close:number, volume:number}[]>} key: "market|name" -> 날짜순 가격 기록 */
+/** @returns {Record<string, {price_date:string, open_price:number, high_price:number, low_price:number, close_price:number, trade_volume:number}[]>} holding_key -> 날짜순 가격 기록 */
 function loadPriceHistory() {
   const raw = localStorage.getItem(PRICE_HISTORY_KEY);
   if (!raw) return {};
@@ -113,24 +212,24 @@ function savePriceHistory(history) {
 }
 
 // 같은 날짜에 다시 조회하면 그날 값만 덮어쓰고, 새 날짜면 추가한다(하루 1개 기록 유지).
-// ohlcv: {open, high, low, close, volume} — 종가뿐 아니라 시가·고가·저가·거래량도
-// 같이 남겨야 추세/변동성 분석에 쓸 수 있다.
+// ohlcv: {open_price, high_price, low_price, close_price, trade_volume} — 종가뿐 아니라
+// 시가·고가·저가·거래량도 같이 남겨야 추세/변동성 분석에 쓸 수 있다.
 function appendPriceHistory(key, dateStr, ohlcv) {
   const history = loadPriceHistory();
   const list = history[key] || [];
-  const entry = { date: dateStr, ...ohlcv };
-  const idx = list.findIndex((e) => e.date === dateStr);
+  const entry = { price_date: dateStr, ...ohlcv };
+  const idx = list.findIndex((e) => e.price_date === dateStr);
   if (idx >= 0) {
     list[idx] = entry;
   } else {
     list.push(entry);
-    list.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+    list.sort((a, b) => (a.price_date < b.price_date ? -1 : a.price_date > b.price_date ? 1 : 0));
   }
   history[key] = list;
   savePriceHistory(history);
 }
 
-/** @typedef {{id:string, date:string, market:'KR'|'US', name:string, amount:number, seq:number}} Dividend */
+/** @typedef {{dividend_id:string, dividend_date:string, market_kind:'kr'|'us', stock_name:string, dividend_amount:number, sequence_no:number}} Dividend */
 
 /** @returns {Dividend[]} */
 function loadDividends() {
@@ -148,9 +247,40 @@ function saveDividends(dividends) {
   localStorage.setItem(DIVIDENDS_KEY, JSON.stringify(dividends));
 }
 
+// v1(옛 형식) 저장 데이터를 v2(표준 변수명)로 변환해 새 키에 저장한다.
+// v2 키가 이미 있으면 건너뛰고, v1 키는 지우거나 고치지 않는다(되돌리기·비교용).
+// JSON 오류 등으로 변환하지 못한 항목은 건너뛰고 v1을 그대로 둔다.
+function migrateLegacyDataIfNeeded() {
+  const jobs = [
+    [LEGACY_TX_KEY, TX_KEY, (v) => Array.isArray(v) && v.map(convertLegacyTrade)],
+    [LEGACY_PRICES_KEY, PRICES_KEY, (v) => v && typeof v === "object" && !Array.isArray(v) && convertLegacyKeyMap(v)],
+    [LEGACY_SYMBOLS_KEY, SYMBOLS_KEY, (v) => v && typeof v === "object" && !Array.isArray(v) && convertLegacyKeyMap(v)],
+    [
+      LEGACY_PRICE_HISTORY_KEY,
+      PRICE_HISTORY_KEY,
+      (v) => v && typeof v === "object" && !Array.isArray(v) && convertLegacyPriceHistoryMap(v),
+    ],
+    [LEGACY_DIVIDENDS_KEY, DIVIDENDS_KEY, (v) => Array.isArray(v) && v.map(convertLegacyDividend)],
+  ];
+  jobs.forEach(([legacyKey, newKey, convert]) => {
+    if (localStorage.getItem(newKey) !== null) return; // 이미 v2가 있음
+    const raw = localStorage.getItem(legacyKey);
+    if (raw === null) return;
+    try {
+      const converted = convert(JSON.parse(raw));
+      if (converted === false) throw new Error("예상하지 못한 데이터 구조");
+      localStorage.setItem(newKey, JSON.stringify(converted));
+      console.log(`저장 데이터를 v2로 변환했습니다: ${legacyKey} -> ${newKey}`);
+    } catch (e) {
+      console.error(`저장 데이터 변환 실패(v1은 그대로 둠): ${legacyKey}`, e);
+    }
+  });
+}
+
 // Sprint 1에서 입력해둔 종목이 있으면, 한 번만 거래내역(최초 매수)으로 변환해 이어서 쓴다.
 function migrateOldHoldingsIfNeeded() {
   if (localStorage.getItem(TX_KEY) !== null) return; // 이미 마이그레이션 했음
+  if (localStorage.getItem(LEGACY_TX_KEY) !== null) return; // v1 거래내역이 있으면(변환 실패 포함) 건드리지 않음
 
   const raw = localStorage.getItem(OLD_HOLDINGS_KEY);
   if (!raw) return;
@@ -164,20 +294,20 @@ function migrateOldHoldingsIfNeeded() {
   if (!Array.isArray(oldHoldings) || oldHoldings.length === 0) return;
 
   const transactions = oldHoldings.map((h, i) => ({
-    id: makeId(),
-    date: todayISO(),
-    market: h.market,
-    name: h.name,
-    type: "BUY",
-    qty: Number(h.qty) || 0,
-    price: Number(h.avgPrice) || 0,
-    fee: 0,
-    seq: Date.now() + i,
+    trade_id: makeId(),
+    trade_date: todayISO(),
+    market_kind: LEGACY_MARKET[h.market] || h.market,
+    stock_name: h.name,
+    trade_kind: "buy",
+    trade_quantity: Number(h.qty) || 0,
+    unit_price: Number(h.avgPrice) || 0,
+    trade_fee: 0,
+    sequence_no: Date.now() + i,
   }));
 
   const prices = loadPrices();
   oldHoldings.forEach((h) => {
-    prices[holdingKey(h.market, h.name)] = Number(h.curPrice) || 0;
+    prices[holdingKey(LEGACY_MARKET[h.market] || h.market, h.name)] = Number(h.curPrice) || 0;
   });
 
   saveTransactions(transactions);
@@ -190,40 +320,41 @@ function migrateOldHoldingsIfNeeded() {
 // 매수: 가중평균으로 평균단가 재계산. 매도: 수량만 줄이고 평균단가는 유지.
 function computeHoldings(transactions) {
   const sorted = [...transactions].sort((a, b) => {
-    if (a.date !== b.date) return a.date < b.date ? -1 : 1;
-    return a.seq - b.seq;
+    if (a.trade_date !== b.trade_date) return a.trade_date < b.trade_date ? -1 : 1;
+    return a.sequence_no - b.sequence_no;
   });
 
   const groups = new Map();
 
   for (const tx of sorted) {
-    const key = holdingKey(tx.market, tx.name);
+    const key = holdingKey(tx.market_kind, tx.stock_name);
     if (!groups.has(key)) {
-      groups.set(key, { market: tx.market, name: tx.name, qty: 0, avgPrice: 0 });
+      groups.set(key, { market_kind: tx.market_kind, stock_name: tx.stock_name, holding_quantity: 0, average_price: 0 });
     }
     const g = groups.get(key);
 
-    if (tx.type === "BUY") {
-      const costBefore = g.qty * g.avgPrice;
-      const costAdded = tx.qty * tx.price + (tx.fee || 0);
-      const newQty = g.qty + tx.qty;
-      g.avgPrice = newQty === 0 ? 0 : (costBefore + costAdded) / newQty;
-      g.qty = newQty;
+    if (tx.trade_kind === "buy") {
+      const costBefore = g.holding_quantity * g.average_price;
+      const costAdded = tx.trade_quantity * tx.unit_price + (tx.trade_fee || 0);
+      const newQty = g.holding_quantity + tx.trade_quantity;
+      g.average_price = newQty === 0 ? 0 : (costBefore + costAdded) / newQty;
+      g.holding_quantity = newQty;
     } else {
-      g.qty = g.qty - tx.qty;
+      g.holding_quantity = g.holding_quantity - tx.trade_quantity;
     }
   }
 
-  return [...groups.values()].filter((g) => g.qty > 1e-9);
+  return [...groups.values()].filter((g) => g.holding_quantity > 1e-9);
 }
 
-/** @param {{qty:number, avgPrice:number}} h @param {number} curPrice */
-function calc(h, curPrice) {
-  const buyAmount = h.qty * h.avgPrice;
-  const evalAmount = h.qty * curPrice;
-  const profit = evalAmount - buyAmount;
-  const profitRate = buyAmount === 0 ? 0 : (profit / buyAmount) * 100;
-  return { buyAmount, evalAmount, profit, profitRate };
+// profit_rate 는 0~1 소수다(표준, NR-10). 화면에서만 formatPercent 가 %로 바꾼다.
+/** @param {{holding_quantity:number, average_price:number}} h @param {number} currentPrice */
+function calc(h, currentPrice) {
+  const buy_amount = h.holding_quantity * h.average_price;
+  const evaluation_amount = h.holding_quantity * currentPrice;
+  const profit_amount = evaluation_amount - buy_amount;
+  const profit_rate = buy_amount === 0 ? 0 : profit_amount / buy_amount;
+  return { buy_amount, evaluation_amount, profit_amount, profit_rate };
 }
 
 // --- 시세 자동 조회 ---
@@ -243,17 +374,17 @@ async function fetchPriceTwelveData(apiKey, symbol) {
   if (data.status === "error" || data.code) {
     throw new Error(data.message || "시세 조회에 실패했습니다.");
   }
-  const price = Number(data.close);
-  if (!Number.isFinite(price)) {
+  const current_price = Number(data.close);
+  if (!Number.isFinite(current_price)) {
     throw new Error("가격 데이터를 이해할 수 없습니다.");
   }
   return {
-    price,
-    date: data.datetime || todayISO(),
-    open: Number(data.open),
-    high: Number(data.high),
-    low: Number(data.low),
-    volume: Number(data.volume),
+    current_price,
+    price_date: data.datetime || todayISO(),
+    open_price: Number(data.open),
+    high_price: Number(data.high),
+    low_price: Number(data.low),
+    trade_volume: Number(data.volume),
   };
 }
 
@@ -294,25 +425,25 @@ async function fetchPriceDataGoKr(apiKey, symbol) {
   }
 
   const latest = list.reduce((a, b) => (b.basDt > a.basDt ? b : a));
-  const price = Number(latest.clpr);
-  if (!Number.isFinite(price)) {
+  const current_price = Number(latest.clpr);
+  if (!Number.isFinite(current_price)) {
     throw new Error("가격 데이터를 이해할 수 없습니다.");
   }
 
   const basDt = latest.basDt;
-  const date = `${basDt.slice(0, 4)}-${basDt.slice(4, 6)}-${basDt.slice(6, 8)}`;
+  const price_date = `${basDt.slice(0, 4)}-${basDt.slice(4, 6)}-${basDt.slice(6, 8)}`;
   return {
-    price,
-    date,
-    open: Number(latest.mkp),
-    high: Number(latest.hipr),
-    low: Number(latest.lopr),
-    volume: Number(latest.trqu),
+    current_price,
+    price_date,
+    open_price: Number(latest.mkp),
+    high_price: Number(latest.hipr),
+    low_price: Number(latest.lopr),
+    trade_volume: Number(latest.trqu),
   };
 }
 
-async function fetchCurrentPrice(market, symbol) {
-  if (market === "KR") {
+async function fetchCurrentPrice(marketKind, symbol) {
+  if (marketKind === "kr") {
     const apiKey = loadKrApiKey();
     if (!apiKey) throw new Error("공공데이터포털 API 키가 설정에 없습니다");
     return fetchPriceDataGoKr(apiKey, symbol);
@@ -388,31 +519,34 @@ async function lookupSymbolUs(apiKey, name) {
   return best.symbol;
 }
 
-async function lookupSymbol(market, name) {
-  if (market === "KR") {
+async function lookupSymbol(marketKind, stockName) {
+  if (marketKind === "kr") {
     const apiKey = loadKrApiKey();
     if (!apiKey) throw new Error("공공데이터포털 API 키가 설정에 없습니다");
-    return lookupSymbolKr(apiKey, name);
+    return lookupSymbolKr(apiKey, stockName);
   }
   const apiKey = loadApiKey();
   if (!apiKey) throw new Error("Twelve Data API 키가 설정에 없습니다");
-  return lookupSymbolUs(apiKey, name);
+  return lookupSymbolUs(apiKey, stockName);
 }
 
 /** 종목 하나의 현재가를 조회해 저장하고, 날짜별 히스토리에도 남긴다. */
-async function fetchAndUpdatePrice(market, name) {
-  const key = holdingKey(market, name);
+async function fetchAndUpdatePrice(marketKind, stockName) {
+  const key = holdingKey(marketKind, stockName);
   const symbol = loadSymbols()[key];
 
   if (!symbol) return { ok: false, message: "시세 코드가 없습니다" };
 
   try {
-    const { price, date, open, high, low, volume } = await fetchCurrentPrice(market, symbol);
+    const { current_price, price_date, open_price, high_price, low_price, trade_volume } = await fetchCurrentPrice(
+      marketKind,
+      symbol
+    );
     const prices = loadPrices();
-    prices[key] = price;
+    prices[key] = current_price;
     savePrices(prices);
-    appendPriceHistory(key, date, { open, high, low, close: price, volume });
-    return { ok: true, price, date };
+    appendPriceHistory(key, price_date, { open_price, high_price, low_price, close_price: current_price, trade_volume });
+    return { ok: true, current_price, price_date };
   } catch (e) {
     return { ok: false, message: e.message };
   }
@@ -429,8 +563,8 @@ function setFetchStatus(text) {
 
 // --- 표시 형식 ---
 
-function formatMoney(value, market) {
-  if (market === "KR") {
+function formatMoney(value, marketKind) {
+  if (marketKind === "kr") {
     return Math.round(value).toLocaleString("ko-KR") + "원";
   }
   return (
@@ -446,9 +580,11 @@ function formatQty(value) {
   return value.toLocaleString("ko-KR", { maximumFractionDigits: 4 });
 }
 
-function formatPercent(value) {
-  const sign = value > 0 ? "+" : "";
-  return sign + value.toFixed(2) + "%";
+// rate 는 0~1 소수(예: 0.125). 화면에는 % 로 표시한다.
+function formatPercent(rate) {
+  const percent = rate * 100;
+  const sign = percent > 0 ? "+" : "";
+  return sign + percent.toFixed(2) + "%";
 }
 
 // 한국 주식 관행에 맞춰 상승(이익)은 빨강, 하락(손실)은 파랑으로 표시.
@@ -470,28 +606,28 @@ const SHARE_COLORS = [
   "var(--series-7)",
 ];
 const SHARE_OTHER_COLOR = "var(--series-other)";
-const MARKET_LABEL = { KR: "국내", US: "미국" };
+const MARKET_LABEL = { kr: "국내", us: "미국" };
 
 // 대시보드: 시장별 평가금액(값)·손익(델타)을 스탯 타일로.
 function renderDashboard(holdings, prices) {
   const area = document.getElementById("dashboard-area");
-  const markets = ["KR", "US"];
+  const markets = ["kr", "us"];
 
   const tilesHtml = markets
     .map((market) => {
-      const items = holdings.filter((h) => h.market === market);
+      const items = holdings.filter((h) => h.market_kind === market);
       if (items.length === 0) return "";
 
       let totalBuy = 0;
       let totalEval = 0;
       items.forEach((h) => {
-        const curPrice = prices[holdingKey(h.market, h.name)] || 0;
-        const { buyAmount, evalAmount } = calc(h, curPrice);
-        totalBuy += buyAmount;
-        totalEval += evalAmount;
+        const currentPrice = prices[holdingKey(h.market_kind, h.stock_name)] || 0;
+        const { buy_amount, evaluation_amount } = calc(h, currentPrice);
+        totalBuy += buy_amount;
+        totalEval += evaluation_amount;
       });
       const totalProfit = totalEval - totalBuy;
-      const totalRate = totalBuy === 0 ? 0 : (totalProfit / totalBuy) * 100;
+      const totalRate = totalBuy === 0 ? 0 : totalProfit / totalBuy;
 
       return `
         <div class="stat-tile">
@@ -512,48 +648,48 @@ function renderDashboard(holdings, prices) {
 // 상위 7종목은 각자 색을 받고, 나머지는 "기타"로 묶는다(토큰 한도).
 function renderShare(holdings, prices) {
   const area = document.getElementById("share-area");
-  const markets = ["KR", "US"];
+  const markets = ["kr", "us"];
 
   const blocksHtml = markets
     .map((market) => {
       const items = holdings
-        .filter((h) => h.market === market)
+        .filter((h) => h.market_kind === market)
         .map((h) => {
-          const curPrice = prices[holdingKey(h.market, h.name)] || 0;
-          return { name: h.name, evalAmount: calc(h, curPrice).evalAmount };
+          const currentPrice = prices[holdingKey(h.market_kind, h.stock_name)] || 0;
+          return { stock_name: h.stock_name, evaluation_amount: calc(h, currentPrice).evaluation_amount };
         })
-        .sort((a, b) => b.evalAmount - a.evalAmount);
+        .sort((a, b) => b.evaluation_amount - a.evaluation_amount);
 
       if (items.length === 0) return "";
 
-      const total = items.reduce((sum, x) => sum + x.evalAmount, 0);
+      const total = items.reduce((sum, x) => sum + x.evaluation_amount, 0);
       const top = items.slice(0, SHARE_COLORS.length);
       const rest = items.slice(SHARE_COLORS.length);
 
       const slots = top.map((x, i) => ({ ...x, color: SHARE_COLORS[i] }));
       if (rest.length > 0) {
         slots.push({
-          name: `기타 (${rest.length}종목)`,
-          evalAmount: rest.reduce((sum, x) => sum + x.evalAmount, 0),
+          stock_name: `기타 (${rest.length}종목)`,
+          evaluation_amount: rest.reduce((sum, x) => sum + x.evaluation_amount, 0),
           color: SHARE_OTHER_COLOR,
         });
       }
 
       const segmentsHtml = slots
         .map((s) => {
-          const pct = total === 0 ? 0 : (s.evalAmount / total) * 100;
+          const pct = total === 0 ? 0 : (s.evaluation_amount / total) * 100;
           return `<div class="share-segment" style="width:${pct}%;background-color:${s.color}"></div>`;
         })
         .join("");
 
       const legendHtml = slots
         .map((s) => {
-          const pct = total === 0 ? 0 : (s.evalAmount / total) * 100;
+          const pct = total === 0 ? 0 : (s.evaluation_amount / total) * 100;
           return `
             <div class="legend-row">
               <span class="legend-swatch" style="background-color:${s.color}"></span>
-              <span class="legend-name">${s.name}</span>
-              <span class="legend-value">${pct.toFixed(1)}% · ${formatMoney(s.evalAmount, market)}</span>
+              <span class="legend-name">${s.stock_name}</span>
+              <span class="legend-value">${pct.toFixed(1)}% · ${formatMoney(s.evaluation_amount, market)}</span>
             </div>
           `;
         })
@@ -585,18 +721,18 @@ function renderRank(holdings, prices) {
 
   const rows = holdings
     .map((h) => {
-      const curPrice = prices[holdingKey(h.market, h.name)] || 0;
-      return { name: h.name, market: h.market, profitRate: calc(h, curPrice).profitRate };
+      const currentPrice = prices[holdingKey(h.market_kind, h.stock_name)] || 0;
+      return { stock_name: h.stock_name, market_kind: h.market_kind, profit_rate: calc(h, currentPrice).profit_rate };
     })
-    .sort((a, b) => b.profitRate - a.profitRate);
+    .sort((a, b) => b.profit_rate - a.profit_rate);
 
-  const maxAbs = Math.max(1e-9, ...rows.map((r) => Math.abs(r.profitRate)));
+  const maxAbs = Math.max(1e-9, ...rows.map((r) => Math.abs(r.profit_rate)));
 
   area.innerHTML = rows
     .map((r, i) => {
-      const widthPct = (Math.abs(r.profitRate) / maxAbs) * 100;
-      const isPos = r.profitRate >= 0;
-      const valueLabel = formatPercent(r.profitRate);
+      const widthPct = (Math.abs(r.profit_rate) / maxAbs) * 100;
+      const isPos = r.profit_rate >= 0;
+      const valueLabel = formatPercent(r.profit_rate);
 
       const negSide = !isPos
         ? `<span class="rank-value">${valueLabel}</span><div class="rank-bar neg" style="width:${widthPct}%"></div>`
@@ -607,7 +743,7 @@ function renderRank(holdings, prices) {
 
       return `
         <div class="rank-row">
-          <div class="rank-name">${i + 1}. ${r.name} <span class="rank-market">${MARKET_LABEL[r.market]}</span></div>
+          <div class="rank-name">${i + 1}. ${r.stock_name} <span class="rank-market">${MARKET_LABEL[r.market_kind]}</span></div>
           <div class="rank-track">
             <div class="rank-half rank-half-neg">${negSide}</div>
             <div class="rank-half rank-half-pos">${posSide}</div>
@@ -627,26 +763,26 @@ function renderHoldings(holdings, prices, symbols) {
     return;
   }
 
-  const marketLabel = { KR: "국내", US: "미국" };
-  const symbolPlaceholder = { KR: "예: 005930", US: "예: AAPL" };
+  const marketLabel = MARKET_LABEL;
+  const symbolPlaceholder = { kr: "예: 005930", us: "예: AAPL" };
 
   holdingsArea.innerHTML = holdings
     .map((h) => {
-      const key = holdingKey(h.market, h.name);
-      const curPrice = prices[key] || 0;
+      const key = holdingKey(h.market_kind, h.stock_name);
+      const currentPrice = prices[key] || 0;
       const symbol = symbols[key] || "";
-      const { evalAmount, profit, profitRate } = calc(h, curPrice);
+      const { evaluation_amount, profit_amount, profit_rate } = calc(h, currentPrice);
 
       return `
         <div class="holding-item" data-key="${key}">
           <div class="holding-item-top">
             <span>
-              <span class="holding-item-name">${h.name}</span>
-              <span class="holding-item-market">${marketLabel[h.market]}</span>
+              <span class="holding-item-name">${h.stock_name}</span>
+              <span class="holding-item-market">${marketLabel[h.market_kind]}</span>
             </span>
           </div>
           <div class="holding-item-detail">
-            <span>수량 ${formatQty(h.qty)} · 평균단가 ${formatMoney(h.avgPrice, h.market)}</span>
+            <span>수량 ${formatQty(h.holding_quantity)} · 평균단가 ${formatMoney(h.average_price, h.market_kind)}</span>
           </div>
           <div class="holding-item-symbol-row">
             <span>시세 코드</span>
@@ -657,7 +793,7 @@ function renderHoldings(holdings, prices, symbols) {
                 data-action="symbol-input"
                 data-key="${key}"
                 value="${symbol}"
-                placeholder="${symbolPlaceholder[h.market]}"
+                placeholder="${symbolPlaceholder[h.market_kind]}"
               />
               <button type="button" class="fetch-btn" data-action="lookup-symbol" data-key="${key}">코드찾기</button>
               <button type="button" class="fetch-btn" data-action="fetch-price" data-key="${key}">조회</button>
@@ -672,12 +808,12 @@ function renderHoldings(holdings, prices, symbols) {
               min="0"
               data-action="price-input"
               data-key="${key}"
-              value="${curPrice || ""}"
+              value="${currentPrice || ""}"
             />
           </div>
           <div class="holding-item-detail">
-            <span>평가금액 ${formatMoney(evalAmount, h.market)}</span>
-            <span class="${profitClass(profit)}">${formatMoney(profit, h.market)} (${formatPercent(profitRate)})</span>
+            <span>평가금액 ${formatMoney(evaluation_amount, h.market_kind)}</span>
+            <span class="${profitClass(profit_amount)}">${formatMoney(profit_amount, h.market_kind)} (${formatPercent(profit_rate)})</span>
           </div>
         </div>
       `;
@@ -694,26 +830,26 @@ function renderTransactions(transactions) {
     return;
   }
 
-  const marketLabel = { KR: "국내", US: "미국" };
-  const typeLabel = { BUY: "매수", SELL: "매도" };
-  const typeClass = { BUY: "tx-type-buy", SELL: "tx-type-sell" };
+  const marketLabel = MARKET_LABEL;
+  const typeLabel = { buy: "매수", sell: "매도" };
+  const typeClass = { buy: "tx-type-buy", sell: "tx-type-sell" };
 
   const sortedDesc = [...transactions].sort((a, b) => {
-    if (a.date !== b.date) return a.date > b.date ? -1 : 1;
-    return b.seq - a.seq;
+    if (a.trade_date !== b.trade_date) return a.trade_date > b.trade_date ? -1 : 1;
+    return b.sequence_no - a.sequence_no;
   });
 
   txArea.innerHTML = sortedDesc
     .map((tx) => {
       return `
-        <div class="tx-item" data-id="${tx.id}">
+        <div class="tx-item" data-id="${tx.trade_id}">
           <div class="tx-item-main">
-            <span class="tx-item-date">${tx.date}</span>
+            <span class="tx-item-date">${tx.trade_date}</span>
             <span>
-              <span class="${typeClass[tx.type]}">${typeLabel[tx.type]}</span>
-              ${tx.name} (${marketLabel[tx.market]}) ·
-              ${formatQty(tx.qty)}주 · ${formatMoney(tx.price, tx.market)}
-              ${tx.fee ? ` · 수수료 ${formatMoney(tx.fee, tx.market)}` : ""}
+              <span class="${typeClass[tx.trade_kind]}">${typeLabel[tx.trade_kind]}</span>
+              ${tx.stock_name} (${marketLabel[tx.market_kind]}) ·
+              ${formatQty(tx.trade_quantity)}주 · ${formatMoney(tx.unit_price, tx.market_kind)}
+              ${tx.trade_fee ? ` · 수수료 ${formatMoney(tx.trade_fee, tx.market_kind)}` : ""}
             </span>
           </div>
           <button class="delete-btn" data-action="delete-tx">삭제</button>
@@ -733,12 +869,12 @@ function renderDividends(dividends) {
     return;
   }
 
-  const markets = ["KR", "US"];
+  const markets = ["kr", "us"];
   summaryArea.innerHTML = markets
     .map((market) => {
-      const items = dividends.filter((d) => d.market === market);
+      const items = dividends.filter((d) => d.market_kind === market);
       if (items.length === 0) return "";
-      const total = items.reduce((sum, d) => sum + d.amount, 0);
+      const total = items.reduce((sum, d) => sum + d.dividend_amount, 0);
       return `
         <div class="summary-row">
           <span>${MARKET_LABEL[market]} 배당 합계</span>
@@ -749,17 +885,17 @@ function renderDividends(dividends) {
     .join("");
 
   const sortedDesc = [...dividends].sort((a, b) => {
-    if (a.date !== b.date) return a.date > b.date ? -1 : 1;
-    return b.seq - a.seq;
+    if (a.dividend_date !== b.dividend_date) return a.dividend_date > b.dividend_date ? -1 : 1;
+    return b.sequence_no - a.sequence_no;
   });
 
   listArea.innerHTML = sortedDesc
     .map(
       (d) => `
-        <div class="tx-item" data-id="${d.id}">
+        <div class="tx-item" data-id="${d.dividend_id}">
           <div class="tx-item-main">
-            <span class="tx-item-date">${d.date}</span>
-            <span>${d.name} (${MARKET_LABEL[d.market]}) · ${formatMoney(d.amount, d.market)}</span>
+            <span class="tx-item-date">${d.dividend_date}</span>
+            <span>${d.stock_name} (${MARKET_LABEL[d.market_kind]}) · ${formatMoney(d.dividend_amount, d.market_kind)}</span>
           </div>
           <button class="delete-btn" data-action="delete-dividend">삭제</button>
         </div>
@@ -787,26 +923,26 @@ function render() {
 function setupForm() {
   const form = document.getElementById("transaction-form");
 
-  const dateInput = form.querySelector('input[name="date"]');
+  const dateInput = form.querySelector('input[name="trade_date"]');
   dateInput.value = todayISO();
 
   form.addEventListener("submit", (event) => {
     event.preventDefault();
 
     const formData = new FormData(form);
-    const name = String(formData.get("name")).trim();
-    if (!name) return;
+    const stock_name = String(formData.get("stock_name")).trim();
+    if (!stock_name) return;
 
     const newTx = {
-      id: makeId(),
-      date: String(formData.get("date")) || todayISO(),
-      market: formData.get("market"),
-      name,
-      type: formData.get("type"),
-      qty: Number(formData.get("qty")),
-      price: Number(formData.get("price")),
-      fee: Number(formData.get("fee")) || 0,
-      seq: Date.now(),
+      trade_id: makeId(),
+      trade_date: String(formData.get("trade_date")) || todayISO(),
+      market_kind: formData.get("market_kind"),
+      stock_name,
+      trade_kind: formData.get("trade_kind"),
+      trade_quantity: Number(formData.get("trade_quantity")),
+      unit_price: Number(formData.get("unit_price")),
+      trade_fee: Number(formData.get("trade_fee")) || 0,
+      sequence_no: Date.now(),
     };
 
     const transactions = loadTransactions();
@@ -819,10 +955,10 @@ function setupForm() {
   });
 }
 
-// "market|name" 형태의 key를 market/name으로 되돌린다.
+// "market_kind|stock_name" 형태의 holding_key를 market_kind/stock_name으로 되돌린다.
 function splitHoldingKey(key) {
   const sep = key.indexOf("|");
-  return { market: key.slice(0, sep), name: key.slice(sep + 1) };
+  return { market_kind: key.slice(0, sep), stock_name: key.slice(sep + 1) };
 }
 
 function setupHoldingsActions() {
@@ -851,16 +987,16 @@ function setupHoldingsActions() {
   holdingsArea.addEventListener("click", async (event) => {
     const fetchBtn = event.target.closest('[data-action="fetch-price"]');
     if (fetchBtn) {
-      const { market, name } = splitHoldingKey(fetchBtn.dataset.key);
-      setFetchStatus(`${name} 조회 중...`);
-      const result = await fetchAndUpdatePrice(market, name);
+      const { market_kind, stock_name } = splitHoldingKey(fetchBtn.dataset.key);
+      setFetchStatus(`${stock_name} 조회 중...`);
+      const result = await fetchAndUpdatePrice(market_kind, stock_name);
 
       if (result.ok) {
-        const dateNote = market === "KR" ? ` (${result.date} 종가)` : "";
-        setFetchStatus(`${name} 현재가를 ${formatMoney(result.price, market)}로 갱신했습니다.${dateNote}`);
+        const dateNote = market_kind === "kr" ? ` (${result.price_date} 종가)` : "";
+        setFetchStatus(`${stock_name} 현재가를 ${formatMoney(result.current_price, market_kind)}로 갱신했습니다.${dateNote}`);
         render();
       } else {
-        setFetchStatus(`${name} 조회 실패: ${result.message}`);
+        setFetchStatus(`${stock_name} 조회 실패: ${result.message}`);
       }
       return;
     }
@@ -868,17 +1004,17 @@ function setupHoldingsActions() {
     const lookupBtn = event.target.closest('[data-action="lookup-symbol"]');
     if (lookupBtn) {
       const key = lookupBtn.dataset.key;
-      const { market, name } = splitHoldingKey(key);
-      setFetchStatus(`${name} 시세 코드 찾는 중...`);
+      const { market_kind, stock_name } = splitHoldingKey(key);
+      setFetchStatus(`${stock_name} 시세 코드 찾는 중...`);
       try {
-        const symbol = await lookupSymbol(market, name);
+        const symbol = await lookupSymbol(market_kind, stock_name);
         const symbols = loadSymbols();
         symbols[key] = symbol;
         saveSymbols(symbols);
-        setFetchStatus(`${name}의 시세 코드를 "${symbol}"(으)로 채웠습니다. 맞는지 확인해 주세요.`);
+        setFetchStatus(`${stock_name}의 시세 코드를 "${symbol}"(으)로 채웠습니다. 맞는지 확인해 주세요.`);
         render();
       } catch (e) {
-        setFetchStatus(`${name} 시세 코드 찾기 실패: ${e.message}`);
+        setFetchStatus(`${stock_name} 시세 코드 찾기 실패: ${e.message}`);
       }
     }
   });
@@ -916,11 +1052,11 @@ function setupRefreshAll() {
 
     for (let i = 0; i < holdings.length; i++) {
       const h = holdings[i];
-      const result = await fetchAndUpdatePrice(h.market, h.name);
+      const result = await fetchAndUpdatePrice(h.market_kind, h.stock_name);
       if (result.ok) {
         successCount++;
       } else {
-        failMessages.push(`${h.name}: ${result.message}`);
+        failMessages.push(`${h.stock_name}: ${result.message}`);
       }
       setFetchStatus(`전체 종목 조회 중... (${i + 1}/${holdings.length})`);
       await sleep(300); // Twelve Data 무료 플랜의 분당 호출 제한을 피하기 위한 최소 간격
@@ -948,7 +1084,7 @@ function setupTransactionActions() {
 
     if (!window.confirm("이 거래내역을 삭제할까요? (보유수량·평균단가가 다시 계산됩니다)")) return;
 
-    const transactions = loadTransactions().filter((tx) => tx.id !== id);
+    const transactions = loadTransactions().filter((tx) => tx.trade_id !== id);
     saveTransactions(transactions);
     render();
   });
@@ -956,23 +1092,23 @@ function setupTransactionActions() {
 
 function setupDividendForm() {
   const form = document.getElementById("dividend-form");
-  const dateInput = form.querySelector('input[name="date"]');
+  const dateInput = form.querySelector('input[name="dividend_date"]');
   dateInput.value = todayISO();
 
   form.addEventListener("submit", (event) => {
     event.preventDefault();
 
     const formData = new FormData(form);
-    const name = String(formData.get("name")).trim();
-    if (!name) return;
+    const stock_name = String(formData.get("stock_name")).trim();
+    if (!stock_name) return;
 
     const newDividend = {
-      id: makeId(),
-      date: String(formData.get("date")) || todayISO(),
-      market: formData.get("market"),
-      name,
-      amount: Number(formData.get("amount")),
-      seq: Date.now(),
+      dividend_id: makeId(),
+      dividend_date: String(formData.get("dividend_date")) || todayISO(),
+      market_kind: formData.get("market_kind"),
+      stock_name,
+      dividend_amount: Number(formData.get("dividend_amount")),
+      sequence_no: Date.now(),
     };
 
     const dividends = loadDividends();
@@ -997,7 +1133,7 @@ function setupDividendActions() {
 
     if (!window.confirm("이 배당 기록을 삭제할까요?")) return;
 
-    const dividends = loadDividends().filter((d) => d.id !== id);
+    const dividends = loadDividends().filter((d) => d.dividend_id !== id);
     saveDividends(dividends);
     renderDividends(dividends);
   });
@@ -1037,11 +1173,20 @@ function csvEscape(value) {
 
 function buildTransactionsCsv(transactions, symbols) {
   const header = ["날짜", "구분", "종목명", "매수/매도", "수량", "단가", "수수료", "시세코드"];
-  const typeLabel = { BUY: "매수", SELL: "매도" };
+  const typeLabel = { buy: "매수", sell: "매도" };
 
   const rows = transactions.map((tx) => {
-    const symbol = symbols[holdingKey(tx.market, tx.name)] || "";
-    return [tx.date, MARKET_LABEL[tx.market], tx.name, typeLabel[tx.type], tx.qty, tx.price, tx.fee, symbol]
+    const symbol = symbols[holdingKey(tx.market_kind, tx.stock_name)] || "";
+    return [
+      tx.trade_date,
+      MARKET_LABEL[tx.market_kind],
+      tx.stock_name,
+      typeLabel[tx.trade_kind],
+      tx.trade_quantity,
+      tx.unit_price,
+      tx.trade_fee,
+      symbol,
+    ]
       .map(csvEscape)
       .join(",");
   });
@@ -1100,8 +1245,8 @@ async function handleCsvImportFile(file) {
     return;
   }
 
-  const marketFromLabel = { 국내: "KR", 미국: "US" };
-  const typeFromLabel = { 매수: "BUY", 매도: "SELL" };
+  const marketFromLabel = { 국내: "kr", 미국: "us" };
+  const typeFromLabel = { 매수: "buy", 매도: "sell" };
 
   const transactions = loadTransactions();
   const symbols = loadSymbols();
@@ -1113,8 +1258,8 @@ async function handleCsvImportFile(file) {
     if (cols.every((c) => c.trim() === "")) return; // 빈 줄은 조용히 건너뜀
 
     const [date, marketLabel, name, typeLabel2, qtyStr, priceStr, feeStr, symbol] = cols;
-    const market = marketFromLabel[(marketLabel || "").trim()];
-    const type = typeFromLabel[(typeLabel2 || "").trim()];
+    const market_kind = marketFromLabel[(marketLabel || "").trim()];
+    const trade_kind = typeFromLabel[(typeLabel2 || "").trim()];
     const qty = Number(qtyStr);
     const price = Number(priceStr);
     const fee = feeStr && feeStr.trim() !== "" ? Number(feeStr) : 0;
@@ -1123,7 +1268,7 @@ async function handleCsvImportFile(file) {
       errors.push(`${lineNo}줄: 날짜 형식 오류(YYYY-MM-DD)`);
       return;
     }
-    if (!market) {
+    if (!market_kind) {
       errors.push(`${lineNo}줄: 구분은 "국내" 또는 "미국"`);
       return;
     }
@@ -1131,7 +1276,7 @@ async function handleCsvImportFile(file) {
       errors.push(`${lineNo}줄: 종목명 없음`);
       return;
     }
-    if (!type) {
+    if (!trade_kind) {
       errors.push(`${lineNo}줄: 매수/매도는 "매수" 또는 "매도"`);
       return;
     }
@@ -1145,19 +1290,19 @@ async function handleCsvImportFile(file) {
     }
 
     transactions.push({
-      id: makeId(),
-      date: date.trim(),
-      market,
-      name: name.trim(),
-      type,
-      qty,
-      price,
-      fee: Number.isFinite(fee) ? fee : 0,
-      seq: Date.now() + added,
+      trade_id: makeId(),
+      trade_date: date.trim(),
+      market_kind,
+      stock_name: name.trim(),
+      trade_kind,
+      trade_quantity: qty,
+      unit_price: price,
+      trade_fee: Number.isFinite(fee) ? fee : 0,
+      sequence_no: Date.now() + added,
     });
 
     if (symbol && symbol.trim()) {
-      symbols[holdingKey(market, name.trim())] = symbol.trim();
+      symbols[holdingKey(market_kind, name.trim())] = symbol.trim();
     }
     added++;
   });
@@ -1176,14 +1321,16 @@ async function handleCsvImportFile(file) {
 
 function collectBackupData() {
   return {
-    _meta: { app: "주식현황관리", exportedAt: new Date().toISOString(), version: 1 },
-    transactions: loadTransactions(),
-    prices: loadPrices(),
-    symbols: loadSymbols(),
-    priceHistory: loadPriceHistory(),
-    dividends: loadDividends(),
-    apiKey: loadApiKey(),
-    krApiKey: loadKrApiKey(),
+    backup_app_name: "주식현황관리",
+    exported_at: new Date().toISOString(),
+    backup_version: BACKUP_VERSION,
+    trade_list: loadTransactions(),
+    current_price_map: loadPrices(),
+    symbol_code_map: loadSymbols(),
+    price_history_map: loadPriceHistory(),
+    dividend_list: loadDividends(),
+    us_price_api_key: loadApiKey(),
+    kr_price_api_key: loadKrApiKey(),
   };
 }
 
@@ -1193,28 +1340,30 @@ function exportJsonBackup() {
 }
 
 async function handleJsonImportFile(file) {
-  let data;
+  let raw;
   try {
-    data = JSON.parse(await file.text());
+    raw = JSON.parse(await file.text());
   } catch (e) {
     setJsonStatus("JSON 파일을 읽을 수 없습니다.");
     return;
   }
-  if (!data || typeof data !== "object") {
+  if (!raw || typeof raw !== "object") {
     setJsonStatus("올바른 백업 파일이 아닙니다.");
     return;
   }
+  // 옛 백업(v1)이든 새 백업(v2)이든 v2 형식으로 맞춰서 가져온다.
+  const data = convertBackup(raw);
   if (!window.confirm("지금 폰에 있는 데이터를 이 백업 파일 내용으로 덮어씁니다. 계속할까요?")) {
     return;
   }
 
-  if (Array.isArray(data.transactions)) saveTransactions(data.transactions);
-  if (data.prices && typeof data.prices === "object") savePrices(data.prices);
-  if (data.symbols && typeof data.symbols === "object") saveSymbols(data.symbols);
-  if (data.priceHistory && typeof data.priceHistory === "object") savePriceHistory(data.priceHistory);
-  if (Array.isArray(data.dividends)) saveDividends(data.dividends);
-  if (typeof data.apiKey === "string") saveApiKey(data.apiKey);
-  if (typeof data.krApiKey === "string") saveKrApiKey(data.krApiKey);
+  if (Array.isArray(data.trade_list)) saveTransactions(data.trade_list);
+  if (data.current_price_map && typeof data.current_price_map === "object") savePrices(data.current_price_map);
+  if (data.symbol_code_map && typeof data.symbol_code_map === "object") saveSymbols(data.symbol_code_map);
+  if (data.price_history_map && typeof data.price_history_map === "object") savePriceHistory(data.price_history_map);
+  if (Array.isArray(data.dividend_list)) saveDividends(data.dividend_list);
+  if (typeof data.us_price_api_key === "string") saveApiKey(data.us_price_api_key);
+  if (typeof data.kr_price_api_key === "string") saveKrApiKey(data.kr_price_api_key);
 
   document.getElementById("api-key-input").value = loadApiKey();
   document.getElementById("kr-api-key-input").value = loadKrApiKey();
@@ -1254,6 +1403,7 @@ function setupDataManagement() {
   });
 }
 
+migrateLegacyDataIfNeeded();
 migrateOldHoldingsIfNeeded();
 setupSettings();
 setupForm();
