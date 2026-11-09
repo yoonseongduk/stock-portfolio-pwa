@@ -1115,6 +1115,28 @@ function priceChartHtml(entries, averagePrice, marketKind) {
     </div>`;
 }
 
+// 종목 한 줄에 넣는 시세 미니 그래프(최근 60일 종가 선)와 전일비. 시세가 2일 미만이면 둘 다 비어 있다.
+function summaryTrend(entries) {
+  const rows = [...entries].filter((e) => Number.isFinite(e.close_price)).sort((a, b) => (a.price_date < b.price_date ? -1 : 1));
+  if (rows.length < 2) return { spark: "", dayChange: null };
+  const recent = rows.slice(-60);
+  const closes = recent.map((e) => e.close_price);
+  const lo = Math.min(...closes);
+  const span = Math.max(...closes) - lo || 1;
+  const W = 64;
+  const H = 16;
+  const points = closes
+    .map((c, i) => `${((i / (closes.length - 1 || 1)) * W).toFixed(1)},${(H - 1 - ((c - lo) / span) * (H - 2)).toFixed(1)}`)
+    .join(" ");
+  const up = closes[closes.length - 1] >= closes[0];
+  const prev = rows[rows.length - 2].close_price;
+  const last = rows[rows.length - 1].close_price;
+  return {
+    spark: `<svg class="hs-spark" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" aria-hidden="true"><polyline points="${points}" fill="none" stroke="${up ? "#e66767" : "#3987e5"}" stroke-width="1.2" /></svg>`,
+    dayChange: prev === 0 ? null : (last - prev) / prev,
+  };
+}
+
 function holdingRowHtml(r, ctx) {
   const key = escapeHtml(r.key);
   const market = r.h.market_kind;
@@ -1139,17 +1161,19 @@ function holdingRowHtml(r, ctx) {
     .map(([v, label]) => `<option value="${v}" ${v === r.exchange_kind ? "selected" : ""}>${label}</option>`)
     .join("");
   const symbolPlaceholder = { kr: "예: 005930", us: "예: AAPL" }[market];
+  const trend = summaryTrend(ctx.historyByKey[r.key] || []);
 
   return `
     <details class="holding-item" data-key="${key}" ${openHoldingKeys.has(r.key) ? "open" : ""}>
       <summary class="holding-summary">
-        <span class="hs-main">
-          <span class="holding-item-name">${escapeHtml(r.h.stock_name)}</span>
-          <span class="hs-tags">${tags}</span>
-        </span>
-        <span class="hs-value">
-          <span>${formatMoney(r.evaluation_amount, market)}</span>
-          <span class="${profitClass(r.profit_amount)}">${formatPercent(r.profit_rate)}</span>
+        <span class="hs-name holding-item-name">${escapeHtml(r.h.stock_name)}</span>
+        <span class="hs-eval">${formatMoney(r.evaluation_amount, market)}</span>
+        <span class="hs-tags">${tags}</span>
+        <span class="hs-profit ${profitClass(r.profit_amount)}">${formatMoney(r.profit_amount, market)} (${formatPercent(r.profit_rate)})</span>
+        <span class="hs-info">
+          <span>수량 ${formatQty(r.h.holding_quantity)}주 · 평단 ${formatMoney(r.h.average_price, market)} · 현재 ${r.currentPrice ? formatMoney(r.currentPrice, market) : "-"}</span>
+          ${trend.dayChange === null ? "" : `<span class="hs-day ${profitClass(trend.dayChange)}">전일비 ${formatPercent(trend.dayChange)}</span>`}
+          ${trend.spark}
         </span>
       </summary>
       <div class="holding-body">

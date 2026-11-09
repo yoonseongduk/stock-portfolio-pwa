@@ -1020,3 +1020,72 @@ details.help summary {
 .hd-title .fetch-btn {
   margin-left: 6px;
 }
+
+/* 종목 한 줄: 네 칸(이름·평가금액 / 태그·손익 / 수량·평단·현재가·전일비·미니 그래프)을 모두 채운다 */
+.holding-summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas:
+    "name eval"
+    "tags profit"
+    "info info";
+  gap: 3px 8px;
+  align-items: center;
+  padding: 8px 10px;
+}
+
+.hs-name {
+  grid-area: name;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hs-eval {
+  grid-area: eval;
+  text-align: right;
+  font-size: 14px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.hs-tags {
+  grid-area: tags;
+  min-width: 0;
+}
+
+.hs-profit {
+  grid-area: profit;
+  text-align: right;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.hs-info {
+  grid-area: info;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 10px;
+  font-size: 11px;
+  color: #94a3b8;
+}
+
+.hs-info .hs-spark {
+  margin-left: auto;
+}
+
+/* 그룹 머리글: 제목과 소계를 한 줄에 나란히(모자라면 아래로) */
+.group-summary {
+  flex-direction: row;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 2px 10px;
+}
+
+.gs-total {
+  padding-left: 0;
+  margin-left: auto;
+}
