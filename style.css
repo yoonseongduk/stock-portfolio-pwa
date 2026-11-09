@@ -771,3 +771,34 @@ details.help summary {
   text-align: center;
   margin: 4px 0 0;
 }
+
+/* 거래내역 수정 */
+.tx-item-actions {
+  display: flex;
+  gap: 2px;
+  flex: 0 0 auto;
+}
+
+.edit-btn {
+  background: none;
+  border: none;
+  color: #94a3b8;
+  font-size: 13px;
+  padding: 2px 6px;
+  white-space: nowrap;
+}
+
+.edit-btn:active {
+  color: #86efac;
+}
+
+#transaction-form .button-row {
+  margin-top: 4px;
+}
+
+#transaction-form #trade-cancel-btn {
+  background-color: transparent;
+  border: 1px solid #334155;
+  color: #e2e8f0;
+  font-weight: 500;
+}

@@ -76,8 +76,9 @@
     <!-- 거래 -->
     <section class="screen" data-screen="trades" hidden>
       <details class="card add-panel" id="trade-add-panel">
-        <summary>＋ 거래 추가</summary>
+        <summary id="trade-panel-summary">＋ 거래 추가</summary>
         <form id="transaction-form">
+        <input type="hidden" name="trade_id" value="" />
         <div class="field-row">
           <label>
             날짜
@@ -118,9 +119,13 @@
             <input type="number" name="trade_fee" step="any" min="0" value="0" />
           </label>
         </div>
-        <button type="submit">거래 추가</button>
+        <div class="button-row">
+          <button type="submit" id="trade-submit-btn">거래 추가</button>
+          <button type="button" id="trade-cancel-btn" class="secondary-btn" hidden>수정 취소</button>
+        </div>
       </form>
       </details>
+      <p id="trade-form-status" class="hint-text"></p>
 
       <div class="card tx-list-card">
         <div id="tx-area">

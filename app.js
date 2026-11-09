@@ -964,7 +964,10 @@ function renderTransactions(transactions) {
               ${tx.trade_fee ? ` · 수수료 ${formatMoney(tx.trade_fee, tx.market_kind)}` : ""}
             </span>
           </div>
-          <button class="delete-btn" data-action="delete-tx">삭제</button>
+          <span class="tx-item-actions">
+            <button class="edit-btn" data-action="edit-tx">수정</button>
+            <button class="delete-btn" data-action="delete-tx">삭제</button>
+          </span>
         </div>
       `;
     })
@@ -1039,37 +1042,136 @@ function render() {
 
 // --- 이벤트 ---
 
+// ===== 거래 추가 / 수정 (design/06_거래내역수정.md) =====
+function setTradeFormStatus(text) {
+  const el = document.getElementById("trade-form-status");
+  if (el) el.textContent = text;
+}
+
+// 양식을 수정 모드(trade 를 넘김)나 추가 모드(null)로 바꾼다.
+function setTradeFormMode(form, trade) {
+  const editing = Boolean(trade);
+  form.reset();
+  form.querySelector('[name="trade_id"]').value = editing ? trade.trade_id : ""; // hidden 입력은 reset 으로 안 지워져서 직접 비운다
+  form.querySelector('[name="trade_date"]').value = editing ? trade.trade_date : todayISO();
+  if (editing) {
+    form.querySelector('[name="market_kind"]').value = trade.market_kind;
+    form.querySelector('[name="stock_name"]').value = trade.stock_name;
+    form.querySelector('[name="trade_kind"]').value = trade.trade_kind;
+    form.querySelector('[name="trade_quantity"]').value = trade.trade_quantity;
+    form.querySelector('[name="unit_price"]').value = trade.unit_price;
+    form.querySelector('[name="trade_fee"]').value = trade.trade_fee || 0;
+  }
+  document.getElementById("trade-panel-summary").textContent = editing ? "✎ 거래 수정" : "＋ 거래 추가";
+  document.getElementById("trade-submit-btn").textContent = editing ? "수정 저장" : "거래 추가";
+  document.getElementById("trade-cancel-btn").hidden = !editing;
+}
+
+// 입력값 검사. 문제가 있으면 안내 문장을, 없으면 빈 문자열을 돌려준다.
+function validateTradeInput(t) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(t.trade_date)) return "날짜를 YYYY-MM-DD 형식으로 입력해 주세요.";
+  if (!t.stock_name) return "종목명을 입력해 주세요.";
+  if (!Number.isFinite(t.trade_quantity) || t.trade_quantity <= 0) return "수량은 0보다 커야 합니다.";
+  if (!Number.isFinite(t.unit_price) || t.unit_price < 0) return "단가는 0 이상의 숫자여야 합니다.";
+  if (!Number.isFinite(t.trade_fee) || t.trade_fee < 0) return "수수료는 0 이상의 숫자여야 합니다.";
+  return "";
+}
+
+// 한 종목(holding_key)의 최종 보유 수량(매수 합 - 매도 합).
+function finalHoldingQuantity(transactions, key) {
+  return transactions
+    .filter((x) => holdingKey(x.market_kind, x.stock_name) === key)
+    .reduce((sum, x) => sum + (x.trade_kind === "buy" ? x.trade_quantity : -x.trade_quantity), 0);
+}
+
+// 종목 키가 바뀌었을 때 시세 코드·현재가·가격 히스토리를 새 키로 옮긴다. 옮겼으면 true.
+// 새 키에 이미 값이 있으면 덮어쓰지 않고, 옛 키를 쓰는 거래가 하나도 안 남았을 때만 옛 값을 지운다.
+function carryHoldingData(oldKey, newKey, transactions) {
+  if (oldKey === newKey) return false;
+  const stillUsed = transactions.some((x) => holdingKey(x.market_kind, x.stock_name) === oldKey);
+  let moved = false;
+  [
+    [loadSymbols, saveSymbols],
+    [loadPrices, savePrices],
+    [loadPriceHistory, savePriceHistory],
+  ].forEach(([load, save]) => {
+    const map = load();
+    let changed = false;
+    if (map[oldKey] !== undefined && map[newKey] === undefined) {
+      map[newKey] = map[oldKey];
+      changed = true;
+      moved = true;
+    }
+    if (!stillUsed && map[oldKey] !== undefined) {
+      delete map[oldKey];
+      changed = true;
+    }
+    if (changed) save(map);
+  });
+  return moved;
+}
+
 function setupForm() {
   const form = document.getElementById("transaction-form");
+  setTradeFormMode(form, null);
 
-  const dateInput = form.querySelector('input[name="trade_date"]');
-  dateInput.value = todayISO();
+  document.getElementById("trade-cancel-btn").addEventListener("click", () => {
+    setTradeFormMode(form, null);
+    form.closest("details").open = false;
+    setTradeFormStatus("");
+  });
 
   form.addEventListener("submit", (event) => {
     event.preventDefault();
 
     const formData = new FormData(form);
-    const stock_name = String(formData.get("stock_name")).trim();
-    if (!stock_name) return;
-
-    const newTx = {
-      trade_id: makeId(),
+    const editId = String(formData.get("trade_id") || "");
+    const input = {
       trade_date: String(formData.get("trade_date")) || todayISO(),
       market_kind: formData.get("market_kind"),
-      stock_name,
+      stock_name: String(formData.get("stock_name")).trim(),
       trade_kind: formData.get("trade_kind"),
       trade_quantity: Number(formData.get("trade_quantity")),
       unit_price: Number(formData.get("unit_price")),
       trade_fee: Number(formData.get("trade_fee")) || 0,
-      sequence_no: Date.now(),
     };
+    const problem = validateTradeInput(input);
+    if (problem) {
+      setTradeFormStatus(problem);
+      return;
+    }
 
     const transactions = loadTransactions();
-    transactions.push(newTx);
-    saveTransactions(transactions);
+    let note = "";
+    if (editId) {
+      // 수정: 같은 거래(trade_id, sequence_no)를 제자리에서 갱신한다.
+      const idx = transactions.findIndex((x) => x.trade_id === editId);
+      if (idx < 0) {
+        setTradeFormStatus("수정하려는 거래를 찾지 못했습니다(이미 삭제되었을 수 있습니다). 수정을 취소합니다.");
+        setTradeFormMode(form, null);
+        return;
+      }
+      const old = transactions[idx];
+      const oldKey = holdingKey(old.market_kind, old.stock_name);
+      const newKey = holdingKey(input.market_kind, input.stock_name);
+      const next = transactions.map((x, n) => (n === idx ? { ...x, ...input } : x));
+      const negative = [...new Set([oldKey, newKey])].find(
+        (k) => next.some((x) => holdingKey(x.market_kind, x.stock_name) === k) && finalHoldingQuantity(next, k) < -1e-9
+      );
+      if (negative) {
+        setTradeFormStatus(`저장하지 않았습니다. 이렇게 고치면 ${negative.split("|").slice(1).join("|")}의 보유 수량이 마이너스가 됩니다. 매도 수량을 먼저 확인해 주세요.`);
+        return;
+      }
+      saveTransactions(next);
+      if (carryHoldingData(oldKey, newKey, next)) note = " 종목이 바뀌어 시세 코드·현재가를 새 종목으로 옮겼습니다.";
+      note = "거래를 수정했습니다." + note;
+    } else {
+      transactions.push({ trade_id: makeId(), ...input, sequence_no: Date.now() });
+      saveTransactions(transactions);
+    }
 
-    form.reset();
-    dateInput.value = todayISO();
+    setTradeFormMode(form, null);
+    setTradeFormStatus(note);
     render();
     form.dispatchEvent(new CustomEvent("saved")); // 추가 패널을 접는다
   });
@@ -1214,8 +1316,20 @@ function setupRefreshAll() {
 
 function setupTransactionActions() {
   const txArea = document.getElementById("tx-area");
+  const form = document.getElementById("transaction-form");
 
   txArea.addEventListener("click", (event) => {
+    const editBtn = event.target.closest('[data-action="edit-tx"]');
+    if (editBtn) {
+      const trade = loadTransactions().find((tx) => tx.trade_id === editBtn.closest(".tx-item").dataset.id);
+      if (!trade) return;
+      setTradeFormMode(form, trade);
+      setTradeFormStatus("");
+      form.closest("details").open = true;
+      document.getElementById("screen-area").scrollTop = 0;
+      return;
+    }
+
     const button = event.target.closest('[data-action="delete-tx"]');
     if (!button) return;
 
@@ -1226,6 +1340,7 @@ function setupTransactionActions() {
 
     const transactions = loadTransactions().filter((tx) => tx.trade_id !== id);
     saveTransactions(transactions);
+    if (form.querySelector('[name="trade_id"]').value === id) setTradeFormMode(form, null); // 수정 중이던 거래를 지웠다
     render();
   });
 }
