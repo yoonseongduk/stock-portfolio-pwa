@@ -15,3 +15,4 @@ tests/
 .env
 *.key
 docs/계획서.md
+icons/make_icons.py
