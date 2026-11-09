@@ -1148,6 +1148,11 @@ function setCsvStatus(text) {
   if (el) el.textContent = text;
 }
 
+function setDividendCsvStatus(text) {
+  const el = document.getElementById("dividend-csv-status");
+  if (el) el.textContent = text;
+}
+
 function setJsonStatus(text) {
   const el = document.getElementById("json-status");
   if (el) el.textContent = text;
@@ -1193,6 +1198,14 @@ function buildTransactionsCsv(transactions, symbols) {
       .join(",");
   });
 
+  return [header.join(","), ...rows].join("\r\n");
+}
+
+function buildDividendsCsv(dividends) {
+  const header = ["날짜", "구분", "종목명", "배당금액"];
+  const rows = dividends.map((d) =>
+    [d.dividend_date, MARKET_LABEL[d.market_kind], d.stock_name, d.dividend_amount].map(csvEscape).join(",")
+  );
   return [header.join(","), ...rows].join("\r\n");
 }
 
@@ -1321,6 +1334,79 @@ async function handleCsvImportFile(file) {
   setCsvStatus(summary);
 }
 
+// 배당내역 CSV 가져오기: 줄 단위로 검증하고, 이미 같은 날짜·구분·종목명·금액이 있으면 건너뛴다.
+async function handleDividendCsvImportFile(file) {
+  const BOM = String.fromCharCode(0xfeff);
+  const text = (await file.text()).replace(new RegExp("^" + BOM), ""); // 엑셀이 붙이는 UTF-8 BOM 제거
+  const rows = parseCsv(text);
+  if (rows.length <= 1) {
+    setDividendCsvStatus("가져올 내용이 없습니다 (빈 파일이거나 머리글만 있음).");
+    return;
+  }
+
+  const marketFromLabel = { 국내: "kr", 미국: "us" };
+  const dividends = loadDividends();
+  const existing = new Set(
+    dividends.map((d) => [d.dividend_date, d.market_kind, d.stock_name, Number(d.dividend_amount)].join("|"))
+  );
+  let added = 0;
+  let skippedSame = 0;
+  const errors = [];
+
+  rows.slice(1).forEach((cols, idx) => {
+    const lineNo = idx + 2; // 머리글 포함 실제 줄 번호
+    if (cols.every((c) => c.trim() === "")) return; // 빈 줄은 조용히 건너뜀
+
+    const [date, marketLabel, name, amountStr] = cols;
+    const market_kind = marketFromLabel[(marketLabel || "").trim()];
+    const amount = Number(amountStr);
+
+    if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date.trim())) {
+      errors.push(`${lineNo}줄: 날짜 형식 오류(YYYY-MM-DD)`);
+      return;
+    }
+    if (!market_kind) {
+      errors.push(`${lineNo}줄: 구분은 "국내" 또는 "미국"`);
+      return;
+    }
+    if (!name || !name.trim()) {
+      errors.push(`${lineNo}줄: 종목명 없음`);
+      return;
+    }
+    if (!amountStr || amountStr.trim() === "" || !Number.isFinite(amount) || amount < 0) {
+      errors.push(`${lineNo}줄: 배당금액 오류`);
+      return;
+    }
+
+    const key = [date.trim(), market_kind, name.trim(), amount].join("|");
+    if (existing.has(key)) {
+      skippedSame++;
+      return;
+    }
+
+    dividends.push({
+      dividend_id: makeId(),
+      dividend_date: date.trim(),
+      market_kind,
+      stock_name: name.trim(),
+      dividend_amount: amount,
+      sequence_no: Date.now() + added,
+    });
+    added++;
+  });
+
+  saveDividends(dividends);
+  renderDividends(loadDividends());
+
+  const summary =
+    `${added}줄 가져옴` +
+    (skippedSame > 0 ? ` · 이미 있는 ${skippedSame}줄 건너뜀` : "") +
+    (errors.length > 0
+      ? ` · ${errors.length}줄 오류로 건너뜀 (${errors.slice(0, 5).join(", ")}${errors.length > 5 ? " 외" : ""})`
+      : "");
+  setDividendCsvStatus(summary);
+}
+
 function collectBackupData() {
   return {
     backup_app_name: "주식현황관리",
@@ -1378,7 +1464,7 @@ function setupDataManagement() {
   document.getElementById("export-csv-btn").addEventListener("click", () => {
     const csv = buildTransactionsCsv(loadTransactions(), loadSymbols());
     downloadTextFile(`거래내역_${todayISO()}.csv`, String.fromCharCode(0xfeff) + csv, "text/csv;charset=utf-8");
-    setCsvStatus("CSV 파일을 내보냈습니다.");
+    setCsvStatus("거래내역 CSV 파일을 내보냈습니다.");
   });
 
   const csvFileInput = document.getElementById("import-csv-file");
@@ -1388,6 +1474,21 @@ function setupDataManagement() {
     if (!file) return;
     await handleCsvImportFile(file);
     csvFileInput.value = "";
+  });
+
+  document.getElementById("export-dividend-csv-btn").addEventListener("click", () => {
+    const csv = buildDividendsCsv(loadDividends());
+    downloadTextFile(`배당내역_${todayISO()}.csv`, String.fromCharCode(0xfeff) + csv, "text/csv;charset=utf-8");
+    setDividendCsvStatus("배당내역 CSV 파일을 내보냈습니다.");
+  });
+
+  const dividendCsvFileInput = document.getElementById("import-dividend-csv-file");
+  document.getElementById("import-dividend-csv-btn").addEventListener("click", () => dividendCsvFileInput.click());
+  dividendCsvFileInput.addEventListener("change", async () => {
+    const file = dividendCsvFileInput.files[0];
+    if (!file) return;
+    await handleDividendCsvImportFile(file);
+    dividendCsvFileInput.value = "";
   });
 
   document.getElementById("export-json-btn").addEventListener("click", () => {

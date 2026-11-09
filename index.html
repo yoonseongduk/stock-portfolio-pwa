@@ -167,17 +167,24 @@
     <!-- 데이터 관리 (더보기) -->
     <section class="screen" data-screen="data" hidden>
       <div class="card data-card">
-      <h3>거래내역 CSV (엑셀로 일괄 등록·확인)</h3>
+      <h3>CSV (엑셀로 일괄 등록·확인)</h3>
       <p class="hint-text">
-        컬럼: 날짜,구분,종목명,매수/매도,수량,단가,수수료,시세코드(선택). 시세코드를
-        비워두면 나중에 종목 카드의 "코드찾기" 버튼으로 채울 수 있습니다.
+        거래내역 컬럼: 날짜,구분,종목명,매수/매도,수량,단가,수수료,시세코드(선택). 시세코드를
+        비워두면 종목 카드의 "코드찾기"로 채울 수 있습니다.
+        배당내역 컬럼: 날짜,구분,종목명,배당금액. 배당은 이미 같은 내용이 있으면 가져올 때 건너뜁니다.
       </p>
       <div class="button-row">
-        <button type="button" id="export-csv-btn" class="secondary-btn">CSV 내보내기</button>
-        <button type="button" id="import-csv-btn" class="secondary-btn">CSV 가져오기</button>
+        <button type="button" id="export-csv-btn" class="secondary-btn">거래내역 내보내기</button>
+        <button type="button" id="import-csv-btn" class="secondary-btn">거래내역 가져오기</button>
       </div>
       <input type="file" id="import-csv-file" accept=".csv" style="display:none" />
       <p id="csv-status" class="hint-text"></p>
+      <div class="button-row">
+        <button type="button" id="export-dividend-csv-btn" class="secondary-btn">배당내역 내보내기</button>
+        <button type="button" id="import-dividend-csv-btn" class="secondary-btn">배당내역 가져오기</button>
+      </div>
+      <input type="file" id="import-dividend-csv-file" accept=".csv" style="display:none" />
+      <p id="dividend-csv-status" class="hint-text"></p>
 
       <h3>전체 백업 (JSON)</h3>
       <p class="hint-text">
