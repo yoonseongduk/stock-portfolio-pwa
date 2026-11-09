@@ -162,14 +162,14 @@
             </select>
           </label>
           <label class="grow" id="dividend-rate-label" hidden>
-            그날 환율 (1달러당 원)
-            <input type="number" name="krw_per_usd" step="any" min="0" placeholder="예: 1350" />
+            환율 (1달러당 원, 비우면 자동 조회)
+            <input type="number" name="krw_per_usd" step="any" min="0" placeholder="비우면 배당일 환율을 자동으로 가져옴" />
           </label>
         </div>
-        <p id="dividend-form-status" class="hint-text"></p>
-        <button type="submit">배당 추가</button>
+        <button type="submit" id="dividend-submit-btn">배당 추가</button>
       </form>
       </details>
+      <p id="dividend-form-status" class="hint-text"></p>
 
       <div class="card dividend-card">
         <div id="dividend-summary"></div>
@@ -186,7 +186,7 @@
       <p class="hint-text">
         거래내역 컬럼: 날짜,구분,종목명,매수/매도,수량,단가,수수료,시세코드(선택). 시세코드를
         비워두면 종목 카드의 "코드찾기"로 채울 수 있습니다.
-        배당내역 컬럼: 날짜,구분,종목명,배당금액,원화금액,환율(미국 배당을 원화로 입력한 경우만). 배당은 이미 같은 내용이 있으면 가져올 때 건너뜁니다.
+        배당내역 컬럼: 날짜,구분,종목명,배당금액,원화금액,환율,환율기준일(뒤의 세 열은 미국 배당을 원화로 입력한 경우만). 배당은 이미 같은 내용이 있으면 가져올 때 건너뜁니다.
       </p>
       <div class="button-row">
         <button type="button" id="export-csv-btn" class="secondary-btn">거래내역 내보내기</button>
