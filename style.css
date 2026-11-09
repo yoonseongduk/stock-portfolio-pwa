@@ -994,3 +994,29 @@ details.help summary {
   gap: 8px;
   font-size: 14px;
 }
+
+/* 가격 추이 차트 */
+.price-chart {
+  width: 100%;
+  height: auto;
+  margin-top: 6px;
+  background-color: #0f172a;
+  border-radius: 8px;
+}
+
+.pc-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 10px;
+  margin-top: 4px;
+  font-size: 11px;
+  color: #94a3b8;
+}
+
+.pc-avg-note {
+  color: #facc15;
+}
+
+.hd-title .fetch-btn {
+  margin-left: 6px;
+}

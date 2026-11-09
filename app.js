@@ -402,17 +402,18 @@ async function fetchPriceTwelveData(apiKey, symbol) {
 // 자동으로 다시 인코딩하므로 Encoding 키를 쓰면 이중 인코딩으로 깨진다.
 // 공공데이터포털 주식시세정보 호출 공통 함수(시세 조회와 코드 찾기가 같이 쓴다).
 // query 에 종목코드(likeSrtnCd)나 종목명(itmsNm, likeItmsNm) 조건을 넘긴다. 영업일을 모를 수 있어 9일 전부터 조회한다.
-async function fetchDataGoKrItems(apiKey, query, numOfRows, failMessage) {
+// range: { begin, end, pageNo } 로 기간(Date)과 쪽을 정한다. 없으면 오늘부터 9일 전까지, 1쪽.
+async function fetchDataGoKrItems(apiKey, query, numOfRows, failMessage, range = {}) {
   const pad = (n) => String(n).padStart(2, "0");
   const toBasDt = (d) => `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}`;
-  const end = new Date();
-  const begin = new Date(end.getTime() - 9 * 24 * 60 * 60 * 1000);
+  const end = range.end || new Date();
+  const begin = range.begin || new Date(end.getTime() - 9 * 24 * 60 * 60 * 1000);
 
   const params = new URLSearchParams({
     serviceKey: apiKey,
     resultType: "json",
     numOfRows: String(numOfRows),
-    pageNo: "1",
+    pageNo: String(range.pageNo || 1),
     ...query,
     beginBasDt: toBasDt(begin),
     endBasDt: toBasDt(end),
@@ -1072,6 +1073,48 @@ function sectorOptionsHtml(choices, current) {
   return `<option value="" ${current ? "" : "selected"}>미분류</option>${options}<option value="__new">＋ 새 섹터 입력…</option>`;
 }
 
+// 가격 추이 차트(SVG). 종가 선 + 내 평균단가 점선. 기록이 2일 미만이면 안내만 돌려준다.
+function priceChartHtml(entries, averagePrice, marketKind) {
+  const rows = [...entries].filter((e) => Number.isFinite(e.close_price)).sort((a, b) => (a.price_date < b.price_date ? -1 : 1)).slice(-250);
+  if (rows.length < 2) {
+    return `<div class="hd-note">저장된 시세가 ${rows.length}일뿐입니다. '과거 시세 채우기'를 눌러 주세요.</div>`;
+  }
+  const W = 300;
+  const H = 110;
+  const PADX = 4;
+  const PADY = 10;
+  const t = (e) => new Date(e.price_date + "T00:00:00").getTime();
+  const t0 = t(rows[0]);
+  const t1 = t(rows[rows.length - 1]);
+  const values = rows.map((e) => e.close_price).concat(averagePrice > 0 ? [averagePrice] : []);
+  const lo = Math.min(...values);
+  const hi = Math.max(...values);
+  const span = hi - lo || 1;
+  const x = (e) => PADX + ((t(e) - t0) / (t1 - t0 || 1)) * (W - 2 * PADX);
+  const y = (v) => PADY + (1 - (v - lo) / span) * (H - 2 * PADY);
+  const path = rows.map((e, i) => `${i === 0 ? "M" : "L"}${x(e).toFixed(1)},${y(e.close_price).toFixed(1)}`).join(" ");
+  const first = rows[0].close_price;
+  const last = rows[rows.length - 1].close_price;
+  const change = first === 0 ? 0 : (last - first) / first;
+  const color = change >= 0 ? "#e66767" : "#3987e5"; // 한국 관행: 상승 빨강, 하락 파랑
+  const avgLine =
+    averagePrice > 0
+      ? `<line class="pc-avg" x1="${PADX}" x2="${W - PADX}" y1="${y(averagePrice).toFixed(1)}" y2="${y(averagePrice).toFixed(1)}" stroke="#facc15" stroke-width="1" stroke-dasharray="4 3" />`
+      : "";
+  return `
+    <svg class="price-chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="종가 추이">
+      ${avgLine}
+      <path class="pc-line" d="${path}" fill="none" stroke="${color}" stroke-width="1.6" />
+    </svg>
+    <div class="pc-legend">
+      <span>최고 ${formatMoney(Math.max(...rows.map((e) => e.close_price)), marketKind)}</span>
+      <span>최저 ${formatMoney(Math.min(...rows.map((e) => e.close_price)), marketKind)}</span>
+      <span>${rows[0].price_date} ~ ${rows[rows.length - 1].price_date} (${rows.length}일)</span>
+      <span class="${profitClass(change)}">기간 시세 변화 ${formatPercent(change)}</span>
+      ${averagePrice > 0 ? '<span class="pc-avg-note">점선: 내 평균단가</span>' : ""}
+    </div>`;
+}
+
 function holdingRowHtml(r, ctx) {
   const key = escapeHtml(r.key);
   const market = r.h.market_kind;
@@ -1147,6 +1190,12 @@ function holdingRowHtml(r, ctx) {
           ${trades.length > 5 ? `<div class="hd-note">외 ${trades.length - 5}건</div>` : ""}
         </div>
         <div class="hd-section">
+          <div class="hd-title">가격 추이 <span class="hd-note">(저장된 시세 ${(ctx.historyByKey[r.key] || []).length}일)</span>
+            <button type="button" class="fetch-btn" data-action="backfill-one" data-key="${key}">과거 시세 채우기</button>
+          </div>
+          ${priceChartHtml(ctx.historyByKey[r.key] || [], r.h.average_price, market)}
+        </div>
+        <div class="hd-section">
           <div class="hd-title">배당 ${div.count}건${div.count > 0 ? ` · 합계 ${formatMoney(div.total, market)}` : ""}</div>
         </div>
       </div>
@@ -1205,7 +1254,7 @@ function renderHoldings(holdings, prices, symbols, info = {}, transactions = [],
   const sectorChoices = [...new Set([...DEFAULT_SECTORS, ...allRows.map((r) => r.sector_name).filter(Boolean)])].sort((a, b) =>
     a.localeCompare(b, "ko")
   );
-  const ctx = { marketTotals, tradesByKey, dividendByKey, sectorChoices };
+  const ctx = { marketTotals, tradesByKey, dividendByKey, sectorChoices, historyByKey: loadPriceHistory() };
 
   const groups = groupHoldingRows(rows, holdingsView);
   const sectorOptions = [...new Set(allRows.map((r) => r.sector_name).filter(Boolean))]
@@ -1324,7 +1373,7 @@ let autoFillRunning = false;
 // 시세 코드가 있고 거래소가 비어 있는 종목의 거래소를 백그라운드로 채운다(종목마다 하루 1번만 시도).
 async function autoFillExchanges() {
   if (autoFillRunning || !loadAutoFillEnabled()) return;
-  const busy = ["refresh-all-btn", "bulk-symbol-btn"].some((id) => document.getElementById(id)?.disabled);
+  const busy = ["refresh-all-btn", "bulk-symbol-btn", "backfill-btn"].some((id) => document.getElementById(id)?.disabled);
   if (busy) return; // 다른 시세 조회가 한창이면 한도를 같이 쓰므로 양보한다
   const symbols = loadSymbols();
   const info = loadStockInfo();
@@ -1376,6 +1425,169 @@ function setupAutoFill() {
   });
   setupNameAutoFill();
   setTimeout(autoFillExchanges, 2000); // 앱을 연 직후 화면이 자리 잡은 다음 백그라운드로 확인
+}
+
+// ===== 과거 시세 채우기 (design/08_가격히스토리.md) =====
+const BACKFILL_COVER_DAYS = 7; // 첫 매수일에서 이 일수 안에 기록이 시작되면 이미 채워진 것으로 본다
+
+// 한 종목의 일별 시세를 첫 매수일부터 오늘까지 받아 [{price_date, open_price, ...}] 로 돌려준다.
+async function fetchPriceHistoryRange(marketKind, symbol, fromDate) {
+  if (marketKind === "kr") {
+    const apiKey = loadKrApiKey();
+    if (!apiKey) throw new Error("공공데이터포털 API 키가 설정에 없습니다");
+    const rows = [];
+    for (let page = 1; page <= 6; page++) {
+      const list = await fetchDataGoKrItems(apiKey, { likeSrtnCd: symbol }, 1000, "과거 시세 조회에 실패했습니다.", {
+        begin: new Date(fromDate + "T00:00:00"),
+        end: new Date(),
+        pageNo: page,
+      });
+      rows.push(...list);
+      if (list.length < 1000) break;
+    }
+    return rows
+      .map((x) => ({
+        price_date: `${x.basDt.slice(0, 4)}-${x.basDt.slice(4, 6)}-${x.basDt.slice(6, 8)}`,
+        open_price: Number(x.mkp),
+        high_price: Number(x.hipr),
+        low_price: Number(x.lopr),
+        close_price: Number(x.clpr),
+        trade_volume: Number(x.trqu),
+      }))
+      .filter((e) => Number.isFinite(e.close_price));
+  }
+  const apiKey = loadApiKey();
+  if (!apiKey) throw new Error("Twelve Data API 키가 설정에 없습니다");
+  const params = new URLSearchParams({ symbol, interval: "1day", start_date: fromDate, outputsize: "5000", apikey: apiKey });
+  const res = await fetch(`https://api.twelvedata.com/time_series?${params.toString()}`);
+  const data = await res.json();
+  if (data.status === "error" || data.code) throw rateLimitAwareError(data, "과거 시세 조회에 실패했습니다.");
+  return (Array.isArray(data.values) ? data.values : [])
+    .map((v) => ({
+      price_date: String(v.datetime).slice(0, 10),
+      open_price: Number(v.open),
+      high_price: Number(v.high),
+      low_price: Number(v.low),
+      close_price: Number(v.close),
+      trade_volume: Number(v.volume),
+    }))
+    .filter((e) => Number.isFinite(e.close_price));
+}
+
+// 받아 온 시세를 저장된 히스토리에 합친다(같은 날짜는 덮어쓰고 날짜순 정렬). 새로 생긴 날짜 수를 돌려준다.
+function mergePriceHistory(key, entries) {
+  const history = loadPriceHistory();
+  const byDate = new Map((history[key] || []).map((e) => [e.price_date, e]));
+  let added = 0;
+  entries.forEach((e) => {
+    if (!byDate.has(e.price_date)) added++;
+    byDate.set(e.price_date, e);
+  });
+  history[key] = [...byDate.values()].sort((a, b) => (a.price_date < b.price_date ? -1 : 1));
+  savePriceHistory(history);
+  return added;
+}
+
+function firstTradeDateOf(key, transactions) {
+  const dates = transactions.filter((t) => holdingKey(t.market_kind, t.stock_name) === key).map((t) => t.trade_date);
+  return dates.length ? dates.sort()[0] : "";
+}
+
+// 한 종목의 과거 시세를 채운다. 분당 한도 오류(429)는 기다렸다가 1번 다시 시도한다.
+async function backfillOne(marketKind, stockName) {
+  const key = holdingKey(marketKind, stockName);
+  const symbol = loadSymbols()[key];
+  if (!symbol) return { ok: false, message: "시세 코드가 없습니다" };
+  const from = firstTradeDateOf(key, loadTransactions());
+  if (!from) return { ok: false, message: "거래내역이 없습니다" };
+  const run = () => fetchPriceHistoryRange(marketKind, symbol, from);
+  try {
+    let entries;
+    try {
+      entries = await run();
+    } catch (e) {
+      if (!e.rate_limited) throw e;
+      await waitWithCountdown(RATE_LIMIT_WAIT_MS, (sec) => `미국 시세 분당 한도에 걸려 ${sec}초 기다린 뒤 ${stockName}을(를) 다시 조회합니다`);
+      entries = await run();
+    }
+    if (entries.length === 0) return { ok: false, message: "받아 온 시세가 없습니다" };
+    return { ok: true, added: mergePriceHistory(key, entries), total: entries.length, from };
+  } catch (e) {
+    return { ok: false, message: e.rate_limited ? "분당 한도(8회)를 넘었습니다" : e.message };
+  }
+}
+
+let backfillRunning = false;
+
+async function backfillAll() {
+  const symbols = loadSymbols();
+  const transactions = loadTransactions();
+  const history = loadPriceHistory();
+  const holdings = [...computeHoldings(transactions)].sort((a, b) => (a.market_kind === b.market_kind ? 0 : a.market_kind === "kr" ? -1 : 1));
+  const targets = [];
+  let covered = 0;
+  holdings.forEach((h) => {
+    const key = holdingKey(h.market_kind, h.stock_name);
+    if (!symbols[key]) return;
+    const from = firstTradeDateOf(key, transactions);
+    const first = (history[key] || [])[0];
+    const limit = new Date(new Date(from + "T00:00:00").getTime() + BACKFILL_COVER_DAYS * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    if (first && first.price_date <= limit) covered++;
+    else targets.push(h);
+  });
+  const failed = [];
+  let filled = 0;
+  for (let i = 0; i < targets.length; i++) {
+    const h = targets[i];
+    setFetchStatus(`과거 시세 채우는 중... (${i + 1}/${targets.length}) ${h.stock_name}`);
+    const result = await backfillOne(h.market_kind, h.stock_name);
+    if (result.ok) filled++;
+    else failed.push(`${h.stock_name}: ${result.message}`);
+    if (i < targets.length - 1) await sleep(REFRESH_GAP_MS[h.market_kind] ?? 0);
+  }
+  return { target_cnt: targets.length, covered, filled, failed };
+}
+
+function setupBackfill() {
+  const button = document.getElementById("backfill-btn");
+  button.addEventListener("click", async () => {
+    if (backfillRunning) return;
+    backfillRunning = true;
+    button.disabled = true;
+    try {
+      const r = await backfillAll();
+      renderHoldingsOnly();
+      const shown = r.failed.slice(0, 3).join(", ") + (r.failed.length > 3 ? ` 외 ${r.failed.length - 3}개` : "");
+      setFetchStatus(
+        r.target_cnt === 0
+          ? `채울 종목이 없습니다. (이미 채워진 종목 ${r.covered}개, 시세 코드가 없는 종목은 건너뜀)`
+          : `과거 시세 ${r.filled}종목 채움 · 이미 채워진 ${r.covered}종목 건너뜀` + (r.failed.length > 0 ? ` · 실패 ${r.failed.length}개 (${shown})` : "")
+      );
+    } finally {
+      backfillRunning = false;
+      button.disabled = false;
+    }
+  });
+  // 종목 상세의 '과거 시세 채우기'(한 종목)
+  document.getElementById("holdings-area").addEventListener("click", async (event) => {
+    const btn = event.target.closest('[data-action="backfill-one"]');
+    if (!btn || backfillRunning) return;
+    const { market_kind, stock_name } = splitHoldingKey(btn.dataset.key);
+    backfillRunning = true;
+    btn.disabled = true;
+    setFetchStatus(`${stock_name} 과거 시세 채우는 중...`);
+    try {
+      const r = await backfillOne(market_kind, stock_name);
+      setFetchStatus(
+        r.ok
+          ? `${stock_name} 과거 시세 ${r.total}일을 받았습니다(${r.from}부터, 새로 추가 ${r.added}일).`
+          : `${stock_name} 과거 시세 조회 실패: ${r.message}`
+      );
+      renderHoldingsOnly();
+    } finally {
+      backfillRunning = false;
+    }
+  });
 }
 
 // 보유 화면만 다시 그린다(검색·필터를 바꿀 때).
@@ -2640,6 +2852,7 @@ setupRefreshAll();
 setupBulkSymbols();
 setupHoldingsView();
 setupAutoFill();
+setupBackfill();
 setupTransactionActions();
 setupDividendForm();
 setupDividendActions();
