@@ -1138,3 +1138,25 @@ details.help summary {
 .alert-settings-grid label { display: flex; flex-direction: column; gap: 3px; font-size: 0.82rem; color: #cbd5e1; }
 .alert-settings-grid input { padding: 5px 6px; background: #0f172a; color: #e2e8f0; border: 1px solid #334155; border-radius: 6px; }
 #alert-banner-area:empty { display: none; } /* 빈 영역이 화면 간격(gap)을 차지하지 않게 */
+
+/* ===== 시세 시그널·용어집 (design/11_시그널과용어집.md) ===== */
+#signal-banner-area:empty { display: none; }
+.signal-banner { border-left-color: #199e70; }
+.signal-badge { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 0.72rem; font-weight: 700; color: #fff; }
+.signal-buy_watch { background: #199e70; }
+.signal-sell_review { background: #d95926; }
+.signal-weight { background: #c98500; }
+.sig-buy { color: #6ee7b7; }
+.sig-sell { color: #fdba74; }
+.sig-weight { color: #fcd34d; }
+.sig-metrics { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 0.82rem; color: #cbd5e1; margin-top: 4px; }
+.gl-btn { width: 1.35em; height: 1.35em; padding: 0; margin: 0 2px; border-radius: 50%; border: 1px solid #64748b; background: transparent; color: #94a3b8; font-size: 0.72rem; line-height: 1; cursor: pointer; }
+.gl-group { margin-top: 12px; }
+.gl-group-title { font-weight: 700; color: #cbd5e1; margin-bottom: 4px; }
+.gl-term { border-top: 1px solid #1e293b; padding: 6px 0; }
+.gl-term summary { cursor: pointer; display: flex; flex-direction: column; gap: 2px; }
+.gl-summary { color: #94a3b8; font-size: 0.82rem; }
+.gl-body { padding: 6px 0 2px; font-size: 0.9rem; line-height: 1.5; }
+.gl-body p { margin: 4px 0; }
+.gl-formula { color: #93c5fd; font-size: 0.82rem; }
+#glossary-query { width: 100%; box-sizing: border-box; padding: 8px; background: #0f172a; color: #e2e8f0; border: 1px solid #334155; border-radius: 6px; }

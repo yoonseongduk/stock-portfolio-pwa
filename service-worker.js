@@ -14,6 +14,8 @@ const CACHE_FILES = [
   "./style.css",
   "./version.js",
   "./js/alert_rules.js",
+  "./js/signals.js",
+  "./js/glossary.js",
   "./app.js",
   "./manifest.json",
 ];

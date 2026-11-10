@@ -22,6 +22,7 @@
     <!-- 현황 -->
     <section class="screen" data-screen="home" hidden>
       <div id="alert-banner-area"></div>
+      <div id="signal-banner-area"></div>
       <div class="card dashboard-card">
         <div id="dashboard-area">
           <p class="empty-message">아직 보유 중인 종목이 없습니다.</p>
@@ -76,6 +77,11 @@
             <button type="button" class="chip" data-hv="market_filter" data-val="kr">국장</button>
             <button type="button" class="chip" data-hv="market_filter" data-val="us">미장</button>
           </div>
+          <div class="chip-row" id="hv-signal">
+            <button type="button" class="chip" data-hv="signal_filter" data-val="all">시그널 전체</button>
+            <button type="button" class="chip" data-hv="signal_filter" data-val="buy_watch">매수 관심</button>
+            <button type="button" class="chip" data-hv="signal_filter" data-val="sell_review">매도 검토</button>
+          </div>
           <div class="chip-row" id="hv-exchange" hidden>
             <button type="button" class="chip" data-hv="exchange_filter" data-val="all">전체</button>
             <button type="button" class="chip" data-hv="exchange_filter" data-val="kospi">코스피</button>
@@ -109,10 +115,13 @@
         </div>
       </div>
       <details class="card alert-settings-card">
-        <summary>🎯 목표가·손절가 기준 (수정 가능)</summary>
+        <summary>🎯 시그널·목표가·손절가 기준 (수정 가능)</summary>
         <p class="hint-text">기본은 시장에서 흔히 쓰는 방식입니다: 손절가 = 평균단가 − 2×ATR(14일 평균 진폭, 시세 기록이 부족하면 −10%), 목표가는 손익비 1:2. 아래 값을 바꾸면 자동으로 정한 종목의 목표가·손절가가 새 기준으로 다시 계산됩니다(직접 고친 종목은 그대로).</p>
         <div id="alert-settings-area" class="alert-settings-grid"></div>
         <button type="button" class="fetch-btn" id="alert-settings-reset">기본값으로 되돌리기</button>
+        <p class="hint-text">시세 시그널(이동평균 교차·RSI·추세 이탈)의 기준입니다. 용어는 더보기 &gt; 용어집에서 찾아볼 수 있습니다.</p>
+        <div id="signal-settings-area" class="alert-settings-grid"></div>
+        <button type="button" class="fetch-btn" id="signal-settings-reset">시그널 기준 기본값으로</button>
       </details>
     </section>
 
@@ -310,6 +319,15 @@
       </div>
     </section>
 
+    <!-- 용어집 (더보기) -->
+    <section class="screen" data-screen="glossary" hidden>
+      <div class="card">
+        <input type="search" id="glossary-query" placeholder="용어 검색 (예: RSI, 손절, 이동평균)" autocomplete="off" />
+        <p class="hint-text">앱에서 쓰는 주식 용어를 모았습니다. 지표는 과거 가격으로 계산한 참고 정보이며 매매 권유가 아닙니다.</p>
+        <div id="glossary-area"></div>
+      </div>
+    </section>
+
     <!-- 더보기 메뉴: 탭에 없는 화면 목록(app.js 가 SCREENS 로 채운다) -->
     <section class="screen" data-screen="more" hidden>
       <div class="card">
@@ -324,6 +342,8 @@
 
   <script src="./version.js"></script>
   <script src="./js/alert_rules.js"></script>
+  <script src="./js/signals.js"></script>
+  <script src="./js/glossary.js"></script>
   <script src="./app.js"></script>
 </body>
 </html>

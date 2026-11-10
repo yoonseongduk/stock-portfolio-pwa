@@ -900,6 +900,7 @@ const DEFAULT_HOLDINGS_VIEW = {
   sector_filter: "all", // all | __none | 섹터 이름
   sort_kind: "value", // value | rate | name
   group_kind: "market", // market | sector
+  signal_filter: "all", // all | buy_watch | sell_review
   search_text: "",
 };
 
@@ -970,6 +971,7 @@ function loadHoldingsView() {
     if (typeof saved.sector_filter === "string") view.sector_filter = saved.sector_filter;
     if (["value", "rate", "name"].includes(saved.sort_kind)) view.sort_kind = saved.sort_kind;
     if (["market", "sector"].includes(saved.group_kind)) view.group_kind = saved.group_kind;
+    if (["all", "buy_watch", "sell_review"].includes(saved.signal_filter)) view.signal_filter = saved.signal_filter;
     if (typeof saved.search_text === "string") view.search_text = saved.search_text;
   } catch (e) {
     // 저장된 설정을 못 읽으면 기본값으로 시작한다
@@ -1002,6 +1004,7 @@ function buildHoldingRows(holdings, prices, symbols, info) {
       symbol: symbols[key] || "",
       exchange_kind: meta.exchange_kind || "",
       sector_name: meta.sector_name || "",
+      holding_style_kind: meta.holding_style_kind === "trade" ? "trade" : "long",
       ...calc(h, currentPrice),
     };
   });
@@ -1017,6 +1020,7 @@ function filterHoldingRows(rows, view) {
     if (view.sector_filter !== "all") {
       if (view.sector_filter === "__none" ? r.sector_name !== "" : r.sector_name !== view.sector_filter) return false;
     }
+    if (view.signal_filter !== "all" && (!r.signal || r.signal.signal_state !== view.signal_filter)) return false;
     if (q && !`${r.h.stock_name} ${r.sector_name} ${r.symbol}`.toLowerCase().includes(q)) return false;
     return true;
   });
@@ -1154,7 +1158,9 @@ function holdingRowHtml(r, ctx) {
     `<span class="tag">${MARKET_LABEL[market]}</span>`,
     r.exchange_kind ? `<span class="tag">${EXCHANGE_LABEL[r.exchange_kind]}</span>` : "",
     r.sector_name ? `<span class="tag tag-sector">${escapeHtml(r.sector_name)}</span>` : "",
-    alertBadgeHtml(ctx.alertRules[r.key]),
+    r.holding_style_kind === "trade" ? alertBadgeHtml(ctx.alertRules[r.key]) : "",
+    signalBadgeHtml(r.signal),
+    weightBadgeHtml(ctx, r.key),
   ].join("");
   const marketTotal = ctx.marketTotals[market] || 0;
   const share = marketTotal > 0 ? ((r.evaluation_amount / marketTotal) * 100).toFixed(1) : "0.0";
@@ -1219,7 +1225,9 @@ function holdingRowHtml(r, ctx) {
           </span>
         </div>
         <div class="holding-item-detail"><span>${MARKET_LABEL[market]} 비중 ${share}%</span></div>
-        ${alertSectionHtml(r, ctx.alertRules[r.key])}
+        ${styleRowHtml(r)}
+        ${r.holding_style_kind === "trade" ? alertSectionHtml(r, ctx.alertRules[r.key]) : alertOffNoteHtml()}
+        ${signalSectionHtml(r, ctx)}
         <div class="hd-section">
           <div class="hd-title">거래내역 ${trades.length}건 <span class="hd-note">(수정·삭제는 거래 탭에서)</span></div>
           <ul class="hd-list">${tradeHtml}</ul>
@@ -1261,6 +1269,10 @@ function renderHoldingsToolbar(allRows, shownCount) {
 function renderHoldings(holdings, prices, symbols, info = {}, transactions = [], dividends = []) {
   const holdingsArea = document.getElementById("holdings-area");
   const allRows = buildHoldingRows(holdings, prices, symbols, info);
+  const signalSettings = loadSignalSettings();
+  const historyMap = loadPriceHistory();
+  const atrPeriod = loadAlertSettings().atr_period;
+  allRows.forEach((r) => (r.signal = Signals.computeSignal(historyMap[r.key], signalSettings, atrPeriod)));
 
   if (allRows.length === 0) {
     holdingsArea.innerHTML = '<p class="empty-message">아직 보유 중인 종목이 없습니다.</p>';
@@ -1290,7 +1302,7 @@ function renderHoldings(holdings, prices, symbols, info = {}, transactions = [],
   const sectorChoices = [...new Set([...DEFAULT_SECTORS, ...allRows.map((r) => r.sector_name).filter(Boolean)])].sort((a, b) =>
     a.localeCompare(b, "ko")
   );
-  const ctx = { marketTotals, tradesByKey, dividendByKey, sectorChoices, historyByKey: loadPriceHistory(), alertRules: loadAlertRules() };
+  const ctx = { marketTotals, tradesByKey, dividendByKey, sectorChoices, historyByKey: historyMap, alertRules: loadAlertRules(), weightOver: computeWeightOver(allRows) };
 
   const groups = groupHoldingRows(rows, holdingsView);
   const sectorOptions = [...new Set(allRows.map((r) => r.sector_name).filter(Boolean))]
@@ -1778,6 +1790,301 @@ function renderDividends(dividends) {
     .join("");
 }
 
+// ===== 시세 시그널·투자 성격·용어집 (design/11_시그널과용어집.md) =====
+// 계산은 js/signals.js(Signals)와 js/glossary.js(Glossary)가 하고, 여기서는 저장·화면·이벤트만 이어 준다.
+const SIGNAL_MAP_KEY = "stockSignals_v2"; // signal_state_map: holding_key -> 시그널 상태
+const SIGNAL_SETTINGS_KEY = "stockSignalSettings_v2"; // signal_settings: 산식 상수(수정 영역)
+const SIGNAL_LABEL = { buy_watch: "매수 관심", sell_review: "매도 검토", neutral: "중립", insufficient: "데이터 부족" };
+
+function loadSignalMap() {
+  try {
+    const raw = localStorage.getItem(SIGNAL_MAP_KEY);
+    const map = raw ? JSON.parse(raw) : {};
+    return map && typeof map === "object" ? map : {};
+  } catch (e) {
+    console.error("시그널 상태를 읽는 중 오류:", e);
+    return {};
+  }
+}
+
+function saveSignalMap(map) {
+  localStorage.setItem(SIGNAL_MAP_KEY, JSON.stringify(map));
+}
+
+function loadSignalSettings() {
+  try {
+    const raw = localStorage.getItem(SIGNAL_SETTINGS_KEY);
+    return Signals.mergeSignalSettings(raw ? JSON.parse(raw) : {});
+  } catch (e) {
+    return Signals.mergeSignalSettings({});
+  }
+}
+
+function saveSignalSettings(settings) {
+  localStorage.setItem(SIGNAL_SETTINGS_KEY, JSON.stringify(Signals.mergeSignalSettings(settings)));
+}
+
+// 용어집으로 가는 작은 '?' 버튼 (누르면 그 용어가 펼쳐진 용어집이 열린다)
+function glossaryBtn(termId) {
+  return `<button type="button" class="gl-btn" data-glossary="${termId}" aria-label="용어 설명">?</button>`;
+}
+
+// 종목의 투자 성격. 종목정보에 값이 없으면 장기보유(기본값).
+function holdingStyleOf(info, key) {
+  return (info[key] || {}).holding_style_kind === "trade" ? "trade" : "long";
+}
+
+// 보유 종목의 시그널 상태를 갱신하고 새로 알릴 것을 돌려준다. 바뀌었을 때만 저장한다.
+function syncSignals(holdings) {
+  const keyed = holdings.map((h) => ({ key: holdingKey(h.market_kind, h.stock_name) }));
+  const result = Signals.evaluateSignals(
+    loadSignalMap(),
+    keyed,
+    loadPriceHistory(),
+    loadSignalSettings(),
+    loadAlertSettings().atr_period,
+    new Date().toISOString()
+  );
+  if (result.changed) saveSignalMap(result.signal_map);
+  return result;
+}
+
+function signalBadgeHtml(signal) {
+  if (!signal || (signal.signal_state !== "buy_watch" && signal.signal_state !== "sell_review")) return "";
+  return `<span class="signal-badge signal-${signal.signal_state}">${SIGNAL_LABEL[signal.signal_state]}</span>`;
+}
+
+// 현황 화면의 '시그널 변경' 배너: 상태가 바뀌어 아직 확인하지 않은 것만 보인다.
+function renderSignalBanner(pending) {
+  const area = document.getElementById("signal-banner-area");
+  if (!area) return;
+  if (pending.length === 0) {
+    area.innerHTML = "";
+    return;
+  }
+  const items = pending
+    .map(({ key, signal_state, reasons }) => {
+      const { stock_name } = splitHoldingKey(key);
+      return `<div class="alert-item" data-key="${escapeHtml(key)}">
+        <span class="signal-badge signal-${signal_state}">${SIGNAL_LABEL[signal_state]}</span>
+        <span class="alert-item-text"><strong>${escapeHtml(stock_name)}</strong>
+          <small>${escapeHtml((reasons || [])[0] || "")}</small></span>
+        <button type="button" class="fetch-btn" data-action="signal-go">보기</button>
+        <button type="button" class="fetch-btn" data-action="signal-ack">확인</button>
+      </div>`;
+    })
+    .join("");
+  area.innerHTML = `<div class="card alert-banner signal-banner">
+    <div class="alert-banner-head"><strong>시세 시그널 변경 ${pending.length}건 ${glossaryBtn("signal")}</strong>
+      <button type="button" class="fetch-btn" data-action="signal-ack-all">모두 확인</button></div>
+    <div class="hint-text">과거 가격으로 계산한 참고 정보이며 매매 권유가 아닙니다.</div>
+    ${items}</div>`;
+}
+
+// 전체(원화 환산) 대비 종목 비중이 한도를 넘는 종목. 미국 종목이 있는데 환율이 없으면 건너뛴다.
+function computeWeightOver(rows) {
+  const hasUs = rows.some((r) => r.h.market_kind === "us");
+  const fx = loadFxRate();
+  if (hasUs && !fx) return { total: 0, over: {}, skipped: true };
+  const rate = hasUs ? Number(fx.krw_per_usd) : 1;
+  const items = rows.map((r) => ({ key: r.key, value: r.evaluation_amount * (r.h.market_kind === "us" ? rate : 1) }));
+  return Signals.weightOver(items, loadSignalSettings().max_weight_rate);
+}
+
+function weightBadgeHtml(ctx, key) {
+  return ctx.weightOver && ctx.weightOver.over[key] ? '<span class="signal-badge signal-weight">비중 초과</span>' : "";
+}
+
+// 종목 상세의 '시세 시그널' 영역.
+function signalSectionHtml(r, ctx) {
+  const sig = r.signal;
+  const market = r.h.market_kind;
+  const settings = loadSignalSettings();
+  const lines = [];
+  if (sig.signal_state === "insufficient") {
+    lines.push(
+      `<div class="hd-note">시세 기록이 ${sig.metrics.rows_cnt}일뿐이라 판정할 수 없습니다 (최소 ${sig.needed_cnt}일 필요). 보유 화면 위쪽 '과거 시세 채우기'를 먼저 하세요.</div>`
+    );
+  } else {
+    const reasonLis = [
+      ...sig.buy_reasons.map((x) => `<li class="sig-buy">매수 근거 · ${escapeHtml(x)}</li>`),
+      ...sig.sell_reasons.map((x) => `<li class="sig-sell">매도 근거 · ${escapeHtml(x)}</li>`),
+    ].join("");
+    lines.push(reasonLis ? `<ul class="hd-list">${reasonLis}</ul>` : '<div class="hd-note">지금은 특별한 신호가 없습니다.</div>');
+    if (sig.mixed) lines.push('<div class="hd-note">매수·매도 근거가 엇갈려 중립으로 봅니다.</div>');
+    const m = sig.metrics;
+    const rg = m.range;
+    lines.push(`<div class="sig-metrics">
+      <span>RSI ${glossaryBtn("rsi")} ${m.rsi === null ? "-" : m.rsi.toFixed(1)}</span>
+      <span>${settings.sma_short_period}일선 ${glossaryBtn("sma")} ${formatMoney(m.sma_short, market)}</span>
+      <span>${settings.sma_long_period}일선 ${formatMoney(m.sma_long, market)}</span>
+      <span>추세 이탈선 ${glossaryBtn("trend_break")} ${m.trail ? formatMoney(m.trail.stop_line, market) : "-"}</span>
+      ${rg ? `<span>52주 위치 ${glossaryBtn("range_52w")} ${(rg.position_rate * 100).toFixed(0)}%</span><span>고점 대비 ${glossaryBtn("drawdown")} ${formatPercent(rg.drawdown_rate)}</span>` : ""}
+    </div>`);
+  }
+  const w = ctx.weightOver && ctx.weightOver.over[r.key];
+  if (w) {
+    lines.push(
+      `<div class="hd-note sig-weight">비중 ${glossaryBtn("weight")} ${(w * 100).toFixed(1)}%로 한도 ${(settings.max_weight_rate * 100).toFixed(0)}%를 넘었습니다. 비중 축소(${"리밸런싱"} ${glossaryBtn("rebalancing")})를 검토해 보세요.</div>`
+    );
+  }
+  return `<div class="hd-section signal-section">
+    <div class="hd-title">시세 시그널 ${glossaryBtn("signal")} ${signalBadgeHtml(sig)} <span class="hd-note">참고용 · 매매 권유 아님</span></div>
+    ${lines.join("")}
+  </div>`;
+}
+
+// 장기보유 종목은 평단 기준 목표가·손절가 알림을 쓰지 않는다는 안내.
+function alertOffNoteHtml() {
+  return `<div class="hd-section"><div class="hd-note">장기보유 종목이라 평단 기준 목표가·손절가 알림은 꺼져 있습니다. 시세 시그널을 참고하세요. 단기매매로 바꾸면 목표가·손절가 알림이 켜집니다.</div></div>`;
+}
+
+function styleRowHtml(r) {
+  const key = escapeHtml(r.key);
+  const opt = (v, label) => `<option value="${v}" ${r.holding_style_kind === v ? "selected" : ""}>${label}</option>`;
+  return `<div class="holding-item-price-row">
+    <span>투자 성격 ${glossaryBtn("holding_style")}</span>
+    <select class="info-select" data-action="style-select" data-key="${key}">${opt("long", "장기보유")}${opt("trade", "단기매매")}</select>
+  </div>`;
+}
+
+function setupSignalActions() {
+  document.getElementById("holdings-area").addEventListener("change", (event) => {
+    const sel = event.target.closest('[data-action="style-select"]');
+    if (!sel) return;
+    updateStockInfo(sel.dataset.key, { holding_style_kind: sel.value === "trade" ? "trade" : "" });
+    render();
+  });
+
+  document.getElementById("signal-banner-area").addEventListener("click", (event) => {
+    const map = loadSignalMap();
+    if (event.target.closest('[data-action="signal-ack-all"]')) {
+      Object.keys(map).forEach((k) => (map[k] = Signals.acknowledgeSignal(map[k])));
+      saveSignalMap(map);
+      render();
+      return;
+    }
+    const item = event.target.closest(".alert-item");
+    if (!item) return;
+    const key = item.dataset.key;
+    if (event.target.closest('[data-action="signal-ack"]')) {
+      map[key] = Signals.acknowledgeSignal(map[key]);
+      saveSignalMap(map);
+      render();
+    } else if (event.target.closest('[data-action="signal-go"]')) {
+      openHoldingKeys.add(key);
+      showScreen("holdings");
+      renderHoldingsOnly();
+    }
+  });
+}
+
+// 설정 화면의 시그널 산식 상수 9개(수정 영역). 퍼센트 값은 화면에서는 %로, 저장은 소수로 한다.
+const SIGNAL_SETTING_FIELDS = [
+  { name: "sma_short_period", label: "단기 이동평균 (거래일)" },
+  { name: "sma_long_period", label: "장기 이동평균 (거래일)" },
+  { name: "cross_lookback_days", label: "교차 확인 기간 (거래일)" },
+  { name: "rsi_period", label: "RSI 기간 (거래일)" },
+  { name: "rsi_buy_level", label: "RSI 과매도 기준 (이하)" },
+  { name: "rsi_sell_level", label: "RSI 과열 기준 (이상)" },
+  { name: "trail_lookback_days", label: "추세선 조회 기간 (거래일)" },
+  { name: "trail_atr_multiple", label: "추세 이탈 ATR 배수" },
+  { name: "max_weight_rate", label: "한 종목 최대 비중 (%)", percent: true },
+];
+
+function renderSignalSettings() {
+  const area = document.getElementById("signal-settings-area");
+  if (!area) return;
+  const s = loadSignalSettings();
+  area.innerHTML = SIGNAL_SETTING_FIELDS.map((f) => {
+    const shown = f.percent ? Math.round(s[f.name] * 1000) / 10 : s[f.name];
+    return `<label>${f.label}<input type="number" step="any" min="0" data-signal-setting="${f.name}" value="${shown}" /></label>`;
+  }).join("");
+}
+
+function setupSignalSettings() {
+  renderSignalSettings();
+  document.getElementById("signal-settings-area").addEventListener("change", (event) => {
+    const input = event.target.closest("[data-signal-setting]");
+    if (!input) return;
+    const field = SIGNAL_SETTING_FIELDS.find((f) => f.name === input.dataset.signalSetting);
+    const value = Number(input.value);
+    const next = loadSignalSettings();
+    if (Number.isFinite(value) && value > 0) next[field.name] = field.percent ? value / 100 : value;
+    saveSignalSettings(next);
+    renderSignalSettings(); // 잘못된 값은 기본값/이전 값으로 되돌려 보인다
+    render();
+  });
+  document.getElementById("signal-settings-reset").addEventListener("click", () => {
+    localStorage.removeItem(SIGNAL_SETTINGS_KEY);
+    renderSignalSettings();
+    render();
+  });
+}
+
+// ----- 용어집 화면 -----
+let glossaryOpenId = ""; // 펼쳐 둘 용어
+
+function renderGlossary() {
+  const area = document.getElementById("glossary-area");
+  if (!area) return;
+  const query = document.getElementById("glossary-query").value;
+  const found = Glossary.searchGlossary(query);
+  if (found.length === 0) {
+    area.innerHTML = '<p class="empty-message">찾는 용어가 없습니다. 다른 말로 검색해 보세요.</p>';
+    return;
+  }
+  area.innerHTML = Object.entries(Glossary.CATEGORY_LABEL)
+    .map(([cat, label]) => {
+      const items = found.filter((t) => t.term_category === cat);
+      if (items.length === 0) return "";
+      return `<div class="gl-group"><div class="gl-group-title">${label} (${items.length})</div>${items
+        .map(
+          (t) => `<details class="gl-term" data-term="${t.term_id}" ${t.term_id === glossaryOpenId ? "open" : ""}>
+            <summary><strong>${escapeHtml(t.term_name)}</strong><span class="gl-summary">${escapeHtml(t.term_summary)}</span></summary>
+            <div class="gl-body">
+              <p>${escapeHtml(t.term_detail)}</p>
+              ${t.term_formula ? `<p class="gl-formula">계산: ${escapeHtml(t.term_formula)}</p>` : ""}
+              ${t.term_used_in ? `<p class="hd-note">이 앱에서: ${escapeHtml(t.term_used_in)}</p>` : ""}
+              ${(t.term_aliases || []).length ? `<p class="hd-note">다른 이름: ${escapeHtml(t.term_aliases.join(", "))}</p>` : ""}
+            </div>
+          </details>`
+        )
+        .join("")}</div>`;
+    })
+    .join("");
+}
+
+// 용어집을 열고 그 용어를 펼친다.
+function openGlossary(termId) {
+  glossaryOpenId = termId || "";
+  const q = document.getElementById("glossary-query");
+  if (termId) q.value = "";
+  renderGlossary();
+  showScreen("glossary");
+  if (termId) {
+    const el = document.querySelector(`#glossary-area .gl-term[data-term="${termId}"]`);
+    if (el) el.scrollIntoView({ block: "center" });
+  }
+}
+
+function setupGlossary() {
+  const q = document.getElementById("glossary-query");
+  q.addEventListener("input", () => {
+    glossaryOpenId = "";
+    renderGlossary();
+  });
+  document.addEventListener("click", (event) => {
+    const btn = event.target.closest("[data-glossary]");
+    if (!btn) return;
+    event.preventDefault();
+    event.stopPropagation();
+    openGlossary(btn.dataset.glossary);
+  });
+  renderGlossary();
+}
+// ===== 시세 시그널·투자 성격·용어집 END =====
+
 // ===== 목표가·손절가 알림 (design/10_목표가손절가알림.md) =====
 // 계산은 js/alert_rules.js(AlertRules)가 하고, 여기서는 저장·화면·이벤트만 이어 준다.
 const ALERT_RULES_KEY = "stockAlertRules_v2"; // alert_rule_map: holding_key -> 규칙
@@ -1816,7 +2123,10 @@ const ALERT_STATE_LABEL = { hit_target: "목표가 도달", hit_stop: "손절가
 
 // 보유 종목의 규칙을 맞추고(없으면 자동 생성, 낡은 자동 규칙은 다시 계산) 상태를 판정한다. 바뀌었을 때만 저장한다.
 function syncAlerts(holdings, prices) {
-  const keyed = holdings.map((h) => ({ ...h, key: holdingKey(h.market_kind, h.stock_name) }));
+  const info = loadStockInfo();
+  const keyed = holdings
+    .map((h) => ({ ...h, key: holdingKey(h.market_kind, h.stock_name) }))
+    .filter((h) => holdingStyleOf(info, h.key) === "trade"); // 장기보유 종목은 평단 기준 알림을 쓰지 않는다 (D24)
   const result = AlertRules.evaluateAlerts(
     loadAlertRules(),
     keyed,
@@ -2034,6 +2344,7 @@ function render() {
   autoFillSectors(holdings); // 분류한 적 없는 종목에 이름 규칙으로 섹터를 채운다
   renderKnownStockNames(transactions);
   renderAlertBanner(syncAlerts(holdings, prices).pending); // 목표가·손절가 규칙 맞춤·판정 (보유 화면보다 먼저)
+  renderSignalBanner(syncSignals(holdings).pending); // 시세 시그널 변경 알림
 
   renderDashboard(holdings, prices);
   renderShare(holdings, prices);
@@ -3008,6 +3319,8 @@ function collectBackupData() {
     stock_info_map: loadStockInfo(),
     alert_rule_map: loadAlertRules(),
     alert_settings: loadAlertSettings(),
+    signal_state_map: loadSignalMap(),
+    signal_settings: loadSignalSettings(),
     us_price_api_key: loadApiKey(),
     kr_price_api_key: loadKrApiKey(),
   };
@@ -3044,12 +3357,15 @@ async function handleJsonImportFile(file) {
   if (data.stock_info_map && typeof data.stock_info_map === "object") saveStockInfo(data.stock_info_map);
   if (data.alert_rule_map && typeof data.alert_rule_map === "object") saveAlertRules(data.alert_rule_map);
   if (data.alert_settings && typeof data.alert_settings === "object") saveAlertSettings(data.alert_settings);
+  if (data.signal_state_map && typeof data.signal_state_map === "object") saveSignalMap(data.signal_state_map);
+  if (data.signal_settings && typeof data.signal_settings === "object") saveSignalSettings(data.signal_settings);
   if (typeof data.us_price_api_key === "string") saveApiKey(data.us_price_api_key);
   if (typeof data.kr_price_api_key === "string") saveKrApiKey(data.kr_price_api_key);
 
   document.getElementById("api-key-input").value = loadApiKey();
   document.getElementById("kr-api-key-input").value = loadKrApiKey();
   renderAlertSettings();
+  renderSignalSettings();
 
   render();
   setJsonStatus("백업을 불러왔습니다.");
@@ -3130,6 +3446,7 @@ const SCREENS = [
   { id: "dividends", label: "배당 기록", icon: "💰" },
   { id: "data", label: "데이터 관리", icon: "💾" },
   { id: "settings", label: "설정", icon: "⚙️" },
+  { id: "glossary", label: "용어집", icon: "📖" },
 ];
 
 function getTabScreens() {
@@ -3281,6 +3598,9 @@ setupForm();
 setupHoldingsActions();
 setupAlertActions();
 setupAlertSettings();
+setupSignalActions();
+setupSignalSettings();
+setupGlossary();
 setupRefreshAll();
 setupBulkSymbols();
 setupHoldingsView();
