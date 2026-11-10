@@ -316,7 +316,12 @@
     if (item.enpHmpgUrl) out.website_url = clean(item.enpHmpgUrl, 200);
     if (item.enpRprFnm) out.ceo_name = clean(item.enpRprFnm, 80);
     if (item.enpEstbDt) out.established_date = clean(item.enpEstbDt, 20);
-    return out.industry_name || out.website_url || out.ceo_name || out.established_date ? out : null;
+    // 법인 등록 시장 구분: Y 유가증권, K 코스닥, N 코넥스, 그 밖(E 등)은 기타(비상장일 수 있음)
+    if (item.corpRegMrktDcd) {
+      out.market_code = clean(item.corpRegMrktDcd, 4);
+      out.market_name = clean(item.corpRegMrktDcdNm || { Y: "유가증권", K: "코스닥", N: "코넥스", E: "기타" }[out.market_code] || "", 30);
+    }
+    return out.market_code || out.industry_name || out.website_url || out.ceo_name || out.established_date ? out : null;
   }
 
   /**
@@ -363,13 +368,13 @@
       }
     }
     if (entry.auto) {
-      ["ceo_name", "established_date"].forEach((f) => {
+      ["ceo_name", "established_date", "market_code", "market_name"].forEach((f) => {
         if (entry.auto[f]) view[f] = entry.auto[f];
       });
       if (view.sources.business_summary === "auto") view.summary_lang = entry.auto.summary_lang;
       view.auto_source = entry.auto.source_kind;
     }
-    view.has_any = PROFILE_FIELDS.some((f) => view[f]);
+    view.has_any = PROFILE_FIELDS.some((f) => view[f]) || ["ceo_name", "established_date", "market_name"].some((f) => view[f]); // 대표자·설립일·시장 구분만 있어도 소개 상자에 보여 준다
     return view;
   }
 
@@ -381,7 +386,7 @@
     const rows = [PROFILE_CSV_HEADER];
     for (const key of keys) {
       const view = profileView((map || {})[key]);
-      if (!view.has_any) continue;
+      if (!PROFILE_CSV_FIELDS.some((f) => view[f])) continue; // CSV 로는 직접 고칠 수 있는 항목이 하나라도 있을 때만 내보낸다
       const sep = key.indexOf("|");
       rows.push([key.slice(0, sep) === "us" ? "미국" : "국내", key.slice(sep + 1), ...PROFILE_CSV_FIELDS.map((f) => view[f] || "")]);
     }

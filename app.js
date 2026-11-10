@@ -1276,7 +1276,8 @@ function holdingRowHtml(r, ctx) {
     r.exchange_kind ? `<span class="tag">${EXCHANGE_LABEL[r.exchange_kind]}</span>` : "",
     r.sector_name ? `<span class="tag tag-sector">${escapeHtml(r.sector_name)}</span>` : "",
     r.holding_style_kind === "trade" ? alertBadgeHtml(ctx.alertRules[r.key]) : "",
-    signalBadgeHtml(r.signal),
+    r.market && r.market.signals_unreliable ? "" : signalBadgeHtml(r.signal),
+    marketBadgesHtml(r),
     fundBadgesHtml(r),
     weightBadgeHtml(ctx, r.key),
   ].join("");
@@ -1346,6 +1347,7 @@ function holdingRowHtml(r, ctx) {
         ${styleRowHtml(r)}
         ${r.holding_style_kind === "trade" ? alertSectionHtml(r, ctx.alertRules[r.key]) : alertOffNoteHtml()}
         ${signalSectionHtml(r, ctx)}
+        ${marketStatusSectionHtml(r)}
         ${fundamentalsSectionHtml(r, ctx)}
         <div class="hd-section">
           <div class="hd-title">거래내역 ${trades.length}건 <span class="hd-note">(수정·삭제는 거래 탭에서)</span></div>
@@ -1408,9 +1410,12 @@ function renderHoldings(holdings, prices, symbols, info = {}, transactions = [],
   allRows.forEach((r) => (r.signal = Signals.computeSignal(historyMap[r.key], signalSettings, atrPeriod)));
   const fundMapAll = loadFundamentals();
   const fundSettings = loadFundSignalSettings();
+  const marketSettings = loadMarketSettings();
+  const todayStr = todayISO();
   allRows.forEach((r) => {
+    r.market = MarketStatus.analyzeMarketStatus(historyMap[r.key], todayStr, marketSettings, { marketKind: r.h.market_kind });
     r.health = FundSignals.assessHealth(Fundamentals.yearsOf(fundMapAll, r.key), fundSettings);
-    r.combined = FundSignals.combinedView(r.signal.signal_state, r.health.health_state);
+    r.combined = FundSignals.combinedView(r.market.signals_unreliable ? "neutral" : r.signal.signal_state, r.health.health_state); // 거래정지 의심이면 시세 시그널은 쓰지 않는다
   });
 
   if (allRows.length === 0) {
@@ -2499,7 +2504,11 @@ function profileSectionHtml(r, ctx) {
         ? `<div class="profile-row"><span class="profile-label">하는 일</span><details class="profile-more"><summary>${escapeHtml(text.slice(0, 110))}… ${tag("business_summary")}</summary>${escapeHtml(text)}${note}</details></div>`
         : `<div class="profile-row"><span class="profile-label">하는 일</span><span>${escapeHtml(text)} ${tag("business_summary")}${note}</span></div>`;
   }
-  const meta = [view.ceo_name ? `대표 ${escapeHtml(view.ceo_name)}` : "", view.established_date ? `설립 ${escapeHtml(view.established_date)}` : "", view.website_url ? `홈페이지 ${escapeHtml(view.website_url)}` : ""].filter(Boolean).join(" · ");
+  const marketNote =
+    view.market_code && !["Y", "K", "N"].includes(view.market_code)
+      ? `<div class="hd-note ms-warn">법인 등록 시장 구분이 '${escapeHtml(view.market_name || view.market_code)}'입니다. 상장 법인으로 확인되지 않습니다(상장폐지·비상장일 수 있음, 거래소 공시로 확인하세요).</div>`
+      : "";
+  const meta = [view.market_name ? `시장 구분 ${escapeHtml(view.market_name)}` : "", view.ceo_name ? `대표 ${escapeHtml(view.ceo_name)}` : "", view.established_date ? `설립 ${escapeHtml(view.established_date)}` : "", view.website_url ? `홈페이지 ${escapeHtml(view.website_url)}` : ""].filter(Boolean).join(" · ");
   const body = view.has_any
     ? `${line("업종", "industry_name")}${summaryHtml}${line("주요 제품·서비스", "main_products")}${line("주요 매출원", "revenue_sources")}${meta ? `<div class="hd-note">${meta}</div>` : ""}`
     : '<div class="hd-note">소개가 없습니다. \'기업 정보 받기\'로 업종·소개를 가져오거나 아래에서 직접 입력하세요.</div>';
@@ -2511,7 +2520,7 @@ function profileSectionHtml(r, ctx) {
     `<label>${label}${rows ? `<textarea rows="${rows}" data-profile-field="${field}">${escapeHtml(m[field] || "")}</textarea>` : `<input type="text" data-profile-field="${field}" value="${escapeHtml(m[field] || "")}" />`}</label>`;
   return `<div class="profile-box">
     <div class="hd-title">이 기업은? ${glossaryBtn("business_profile")}</div>
-    ${body}${industryNote}
+    ${body}${industryNote}${marketNote}
     <details class="help profile-form" data-key="${keyAttr}"><summary>기업 소개 직접 입력</summary>
       <div class="profile-form-grid">
         ${input("industry_name", "업종")}
@@ -2647,6 +2656,82 @@ function setupUsDisplay() {
 }
 // ===== 미국 금액 표시 END =====
 
+// ===== 시장 상태 점검 (design/15_시장상태점검.md) =====
+// 계산은 js/market_status.js(MarketStatus)가 하고, 여기서는 저장·화면만 이어 준다.
+const MARKET_SETTINGS_KEY = "stockMarketStatusSettings_v2"; // market_status_settings: 기준값(수정 영역)
+
+function loadMarketSettings() {
+  try {
+    return MarketStatus.mergeMarketSettings(JSON.parse(localStorage.getItem(MARKET_SETTINGS_KEY) || "{}"));
+  } catch (e) {
+    return MarketStatus.mergeMarketSettings({});
+  }
+}
+function saveMarketSettings(settings) {
+  localStorage.setItem(MARKET_SETTINGS_KEY, JSON.stringify(MarketStatus.mergeMarketSettings(settings)));
+}
+
+// 종목 줄 배지: 거래정지 의심, 시세 변화 없음
+function marketBadgesHtml(r) {
+  if (!r.market) return "";
+  if (r.market.halted) return '<span class="fund-badge fund-bad">거래정지 의심</span>';
+  if (r.market.flat_only) return '<span class="fund-badge fund-caution">시세 변화 없음</span>';
+  return "";
+}
+
+// 종목 상세의 '시장 상태' 영역: 시세 기록으로 추정한 거래정지·급등락·거래량·52주·시세 지연
+function marketStatusSectionHtml(r) {
+  const m = r.market;
+  if (!m || m.items.length === 0) return "";
+  const lis = m.items.map((x) => `<li class="ms-${x.tone}">${escapeHtml(x.text)}</li>`).join("");
+  return `<div class="hd-section market-section">
+    <div class="hd-title">시장 상태 ${glossaryBtn(m.halted || m.flat_only ? "trading_halt" : "price_limit")} <span class="hd-note">저장된 시세 기록으로 추정한 참고 정보 · 공식 지정은 거래소 공시로 확인</span></div>
+    <ul class="hd-list">${lis}</ul>
+  </div>`;
+}
+
+// 설정 화면의 시장 상태 기준값 7개(수정 영역). 비율 값은 화면에서 %로 보여 준다.
+const MARKET_SETTING_FIELDS = [
+  { name: "halt_min_days", label: "거래정지 의심: 거래량 0 연속 (거래일)" },
+  { name: "flat_min_days", label: "시세 변화 없음: 같은 종가 연속 (거래일)" },
+  { name: "stale_days", label: "시세 지연: 마지막 시세가 며칠 전 (일)" },
+  { name: "move_alert_rate", label: "급등락 기준 (%, 전일 대비)", percent: true },
+  { name: "limit_near_rate", label: "상·하한가 근접 기준 (%, 국내)", percent: true },
+  { name: "volume_surge_ratio", label: "거래량 급증 (직전 20일 평균의 몇 배)" },
+  { name: "near_extreme_rate", label: "52주 신고·신저가 근처 (%)", percent: true },
+];
+
+function renderMarketSettings() {
+  const area = document.getElementById("market-settings-area");
+  if (!area) return;
+  const s = loadMarketSettings();
+  area.innerHTML = MARKET_SETTING_FIELDS.map((f) => {
+    const shown = f.percent ? Math.round(s[f.name] * 1000) / 10 : s[f.name];
+    return `<label>${f.label}<input type="number" step="any" min="0" data-market-setting="${f.name}" value="${shown}" /></label>`;
+  }).join("");
+}
+
+function setupMarketSettings() {
+  renderMarketSettings();
+  document.getElementById("market-settings-area").addEventListener("change", (event) => {
+    const input = event.target.closest("[data-market-setting]");
+    if (!input) return;
+    const field = MARKET_SETTING_FIELDS.find((f) => f.name === input.dataset.marketSetting);
+    const value = Number(input.value);
+    const next = loadMarketSettings();
+    if (Number.isFinite(value) && value > 0) next[field.name] = field.percent ? value / 100 : value;
+    saveMarketSettings(next);
+    renderMarketSettings();
+    render();
+  });
+  document.getElementById("market-settings-reset").addEventListener("click", () => {
+    localStorage.removeItem(MARKET_SETTINGS_KEY);
+    renderMarketSettings();
+    render();
+  });
+}
+// ===== 시장 상태 점검 END =====
+
 // ===== 재무 건강·기업 이벤트·종합 판단 (design/13_재무시그널과기업이벤트.md) =====
 // 계산은 js/fund_signals.js(FundSignals)가 하고, 여기서는 저장·화면·이벤트만 이어 준다.
 const FUND_EVENTS_KEY = "stockFundEvents_v2"; // fund_event_map: holding_key -> 이벤트 상태
@@ -2687,7 +2772,7 @@ function fundValuationFor(key, currentPrice, fundMap, sharesMap) {
 
 const FUND_EVENT_LABEL = {
   new_year: "새 결산", turned_profit: "흑자전환", turned_loss: "적자전환", op_surge: "영업이익 급증", op_plunge: "영업이익 급감",
-  capital_impairment: "자본잠식", debt_jump: "부채비율 급증", zone: "가치 구간",
+  capital_impairment: "자본잠식", debt_jump: "부채비율 급증", zone: "가치 구간", halt: "거래정지 의심", resume: "거래 재개",
 };
 
 // 보유 종목의 기업 이벤트 상태를 갱신하고 아직 확인하지 않은 이벤트를 돌려준다. 바뀌었을 때만 저장한다.
@@ -2695,10 +2780,14 @@ function syncFundEvents(holdings, prices) {
   const fundMap = loadFundamentals();
   const sharesMap = loadListedShares();
   const settings = loadFundSignalSettings();
+  const historyMap = loadPriceHistory();
+  const marketSettings = loadMarketSettings();
+  const today = todayISO();
   const items = holdings.map((h) => {
     const key = holdingKey(h.market_kind, h.stock_name);
     const { list, val } = fundValuationFor(key, prices[key] || 0, fundMap, sharesMap);
-    return { key, years: list, zone: FundSignals.valuationZone(val, settings) };
+    const ms = MarketStatus.analyzeMarketStatus(historyMap[key], today, marketSettings, { marketKind: h.market_kind });
+    return { key, years: list, zone: FundSignals.valuationZone(val, settings), halted: ms.halted, halt_text: ms.halted ? ms.items[0].text : "" };
   });
   const result = FundSignals.evaluateFundEvents(loadFundEvents(), items, settings, new Date().toISOString());
   if (result.changed) saveFundEvents(result.event_map);
@@ -2932,6 +3021,12 @@ function weightBadgeHtml(ctx, key) {
 
 // 종목 상세의 '시세 시그널' 영역.
 function signalSectionHtml(r, ctx) {
+  if (r.market && r.market.signals_unreliable) {
+    return `<div class="hd-section signal-section">
+      <div class="hd-title">시세 시그널 ${glossaryBtn("signal")} <span class="hd-note">판단하지 않음</span></div>
+      <div class="hd-note ms-danger">${r.market.halted ? "거래정지로 보여" : "시세가 오랫동안 변하지 않아"} 이동평균·RSI 같은 시세 시그널을 판단하지 않습니다(숫자가 의미 없음). 아래 '시장 상태'를 확인하세요.</div>
+    </div>`;
+  }
   const sig = r.signal;
   const market = r.h.market_kind;
   const settings = loadSignalSettings();
@@ -4395,6 +4490,7 @@ function collectBackupData() {
     listed_shares_map: loadListedShares(),
     corp_id_map: loadCorpIds(),
     company_profile_map: loadProfiles(),
+    market_status_settings: loadMarketSettings(),
     fund_event_map: loadFundEvents(),
     fund_signal_settings: loadFundSignalSettings(),
     us_price_api_key: loadApiKey(),
@@ -4440,6 +4536,7 @@ async function handleJsonImportFile(file) {
   if (data.listed_shares_map && typeof data.listed_shares_map === "object") localStorage.setItem(SHARES_KEY, JSON.stringify(data.listed_shares_map));
   if (data.corp_id_map && typeof data.corp_id_map === "object") saveCorpIds(data.corp_id_map);
   if (data.company_profile_map && typeof data.company_profile_map === "object") saveProfiles(data.company_profile_map);
+  if (data.market_status_settings && typeof data.market_status_settings === "object") saveMarketSettings(data.market_status_settings);
   if (data.fund_event_map && typeof data.fund_event_map === "object") saveFundEvents(data.fund_event_map);
   if (data.fund_signal_settings && typeof data.fund_signal_settings === "object") saveFundSignalSettings(data.fund_signal_settings);
   if (typeof data.us_price_api_key === "string") saveApiKey(data.us_price_api_key);
@@ -4450,6 +4547,7 @@ async function handleJsonImportFile(file) {
   renderAlertSettings();
   renderSignalSettings();
   renderFundSignalSettings();
+  renderMarketSettings();
 
   render();
   setJsonStatus("백업을 불러왔습니다.");
@@ -4721,6 +4819,7 @@ setupProfiles();
 setupUsDisplay();
 setupFundSignals();
 setupFundSignalSettings();
+setupMarketSettings();
 setupGlossary();
 setupRefreshAll();
 setupBulkSymbols();

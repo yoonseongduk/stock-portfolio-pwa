@@ -1228,3 +1228,9 @@ details.help summary {
 .profile-form-grid label { display: flex; flex-direction: column; gap: 2px; font-size: 0.78rem; color: #cbd5e1; }
 .profile-form-grid input, .profile-form-grid textarea { padding: 4px 6px; background: #0f172a; color: #e2e8f0; border: 1px solid #334155; border-radius: 6px; font-family: inherit; }
 .us-display { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; }
+
+/* ===== 시장 상태 점검 (design/15_시장상태점검.md) ===== */
+.ms-danger { color: #fca5a5; }
+.ms-warn { color: #fcd34d; }
+.ms-info { color: #cbd5e1; }
+.market-section { border-left: 3px solid #475569; padding-left: 8px; }

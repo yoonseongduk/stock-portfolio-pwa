@@ -166,7 +166,7 @@
       const before = next[it.key];
       let entry;
       if (!before || (!before.has_data && hasData)) {
-        entry = { has_data: hasData, last_fiscal_year: hasData ? latestPair(it.years).latest.fiscal_year : null, zone_state: it.zone || null, ack_ids: events.map((e) => e.id), open_events: [], updated_at: nowIso };
+        entry = { has_data: hasData, last_fiscal_year: hasData ? latestPair(it.years).latest.fiscal_year : null, zone_state: it.zone || null, halt_state: !!it.halted, ack_ids: events.map((e) => e.id), open_events: [], updated_at: nowIso };
       } else {
         entry = { ...before, ack_ids: [...(before.ack_ids || [])], open_events: [...(before.open_events || [])] };
         if (hasData) entry.last_fiscal_year = latestPair(it.years).latest.fiscal_year;
@@ -177,6 +177,15 @@
             if (!entry.open_events.some((e) => e.id === id) && !entry.ack_ids.includes(id)) entry.open_events.push({ id, kind: "zone", text: ZONE_TEXT[zone](s) });
           }
           entry.zone_state = zone;
+        }
+        // 거래정지 의심이 바뀌면(시작·재개) 이벤트. 처음 계산한 종목은 위에서 조용히 시작한다.
+        const halted = !!it.halted;
+        if (halted !== !!entry.halt_state) {
+          const id = `${halted ? "halt" : "resume"}:${nowIso.slice(0, 10)}`;
+          if (!entry.open_events.some((e) => e.id === id) && !entry.ack_ids.includes(id)) {
+            entry.open_events.push({ id, kind: halted ? "halt" : "resume", text: halted ? it.halt_text || "거래정지로 보입니다. 거래소 공시로 확인하세요" : "거래가 재개된 것으로 보입니다" });
+          }
+          entry.halt_state = halted;
         }
         if (JSON.stringify(entry) !== JSON.stringify(before)) entry.updated_at = nowIso;
       }
