@@ -1163,3 +1163,12 @@ details.help summary {
 .pc-trail-note { color: #fb923c; }
 .pc-toggles { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 6px; }
 .pc-ma-chip { border-width: 2px; }
+
+/* ===== 화면 위쪽 이동 막대: 제목 줄에 탭을 넣어 아래 막대를 없앰 ===== */
+.app-header { display: flex; align-items: center; gap: 8px; padding: calc(6px + env(safe-area-inset-top)) 10px 6px 14px; }
+.app-header h1 { flex: 1 1 0; min-width: 0; font-size: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.app-header .tab-bar { flex: 0 0 auto; background: transparent; border-top: 0; padding-bottom: 0; gap: 2px; }
+.app-header .tab-btn { flex: 0 0 auto; min-height: 44px; min-width: 52px; padding: 4px 6px; color: #bbf7d0; font-size: 11px; border-radius: 8px; }
+.app-header .tab-btn .tab-icon { font-size: 18px; }
+.app-header .tab-btn.active { color: #ffffff; background-color: rgba(255, 255, 255, 0.16); }
+.share-summary { display: flex; flex-wrap: wrap; gap: 2px 12px; margin: 2px 0 8px; font-size: 0.82rem; color: #cbd5e1; }

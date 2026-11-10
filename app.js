@@ -775,6 +775,28 @@ function renderDashboard(holdings, prices) {
 
 // 종목 비중: 시장별로 평가금액 기준 part-to-whole 가로 막대 + 범례.
 // 상위 7종목은 각자 색을 받고, 나머지는 "기타"로 묶는다(토큰 한도).
+// 비중 블록 제목 아래의 요약 통계: 종목 수, 평가금액, 손익(수익률), 이익·손실 종목 수. rate 는 원화 환산용 환율(없으면 1).
+function groupStatsHtml(items, marketKind) {
+  let buy = 0;
+  let evaluation = 0;
+  let win = 0;
+  let lose = 0;
+  items.forEach(({ h, price, rate }) => {
+    const c = calc(h, price);
+    buy += c.buy_amount * rate;
+    evaluation += c.evaluation_amount * rate;
+    if (c.profit_amount > 0) win++;
+    else if (c.profit_amount < 0) lose++;
+  });
+  const profit = evaluation - buy;
+  return `<div class="share-summary">
+    <span>${items.length}종목</span>
+    <span>평가 ${formatMoney(evaluation, marketKind)}</span>
+    <span class="${profitClass(profit)}">손익 ${formatMoney(profit, marketKind)} (${formatPercent(buy === 0 ? 0 : profit / buy)})</span>
+    <span><span class="${profitClass(1)}">이익 ${win}</span> · <span class="${profitClass(-1)}">손실 ${lose}</span></span>
+  </div>`;
+}
+
 function renderShare(holdings, prices) {
   const area = document.getElementById("share-area");
   const markets = ["kr", "us"];
@@ -827,6 +849,7 @@ function renderShare(holdings, prices) {
       return `
         <div class="share-block">
           <h3>${MARKET_LABEL[market]} 종목 비중</h3>
+          ${groupStatsHtml(holdings.filter((h) => h.market_kind === market).map((h) => ({ h, price: prices[holdingKey(h.market_kind, h.stock_name)] || 0, rate: 1 })), market)}
           <div class="share-bar">${segmentsHtml}</div>
           <div class="share-legend">${legendHtml}</div>
         </div>
@@ -2876,7 +2899,7 @@ function combinedShareHtml(holdings, prices) {
         <span class="legend-value">${pct(x.evaluation_amount).toFixed(1)}% · ${formatMoney(x.evaluation_amount, "kr")}</span></div>`
     )
     .join("");
-  return `<div class="share-block share-combined"><h3>전체 비중 (원화 환산)</h3><div class="share-bar">${segments}</div><div class="share-legend">${legend}</div></div>`;
+  return `<div class="share-block share-combined"><h3>전체 비중 (원화 환산)</h3>${groupStatsHtml(holdings.map((h) => ({ h, price: prices[holdingKey(h.market_kind, h.stock_name)] || 0, rate: h.market_kind === "us" ? rate : 1 })), "kr")}<div class="share-bar">${segments}</div><div class="share-legend">${legend}</div></div>`;
 }
 
 function setupFxActions() {
