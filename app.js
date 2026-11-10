@@ -2039,7 +2039,10 @@ function fundamentalsSectionHtml(r, ctx) {
   const keyAttr = escapeHtml(key);
   const fetchBtn = `<button type="button" class="fetch-btn" data-action="fund-fetch" data-key="${keyAttr}">기업 정보 받기</button>`;
   const corp = ctx.corpIds[key];
-  const corpNote = market === "kr" && corp ? `<div class="hd-note">법인: ${escapeHtml(corp.corp_name || "")} · 법인등록번호 ${escapeHtml(corp.crno)}</div>` : "";
+  const corpNote =
+    market === "kr" && corp
+      ? `<div class="hd-note">법인: ${escapeHtml(corp.corp_name || "")}${corp.crno ? ` · 법인등록번호 ${escapeHtml(corp.crno)}` : " · 법인 확인 전"}${corp.bzno ? ` · 사업자번호 ${escapeHtml(corp.bzno.slice(0, 3) + "-" + corp.bzno.slice(3, 5) + "-" + corp.bzno.slice(5))}` : ""}</div>`
+      : "";
   const listed = ctx.sharesMap[key];
 
   let body;
@@ -2102,7 +2105,7 @@ function fundamentalsSectionHtml(r, ctx) {
     <button type="button" class="fetch-btn" data-action="fund-save" data-key="${keyAttr}">저장</button>
     <span class="hd-note fund-form-status"></span>
     <div class="hd-note">같은 연도를 다시 저장하면 입력한 칸만 덮어씁니다. 칸을 비우면 기존 값은 그대로입니다.</div>
-    ${market === "kr" ? `<div class="fund-crno"><label>법인등록번호(13자리, 자동으로 못 찾을 때)<input type="text" inputmode="numeric" maxlength="13" data-fund-crno value="${escapeHtml(corp ? corp.crno : "")}" /></label>
+    ${market === "kr" ? `<div class="fund-crno"><label>법인등록번호(13자리) 또는 사업자등록번호(10자리) — 자동으로 못 찾거나 같은 이름이 여럿일 때<input type="text" inputmode="numeric" maxlength="16" data-fund-crno value="${escapeHtml(corp ? corp.crno || corp.bzno || "" : "")}" /></label>
       <button type="button" class="fetch-btn" data-action="fund-crno-save" data-key="${keyAttr}">번호 저장</button></div>` : ""}</details>`;
   return `<div class="hd-section fund-section">
     <div class="hd-title">기업 브리핑 ${glossaryBtn("fundamentals")} <span class="hd-note">결산 재무 · 참고용</span> ${fetchBtn}</div>
@@ -2152,28 +2155,33 @@ async function resolveCorpId(stockName, apiKey) {
   const key = holdingKey("kr", stockName);
   const saved = loadCorpIds()[key];
   if (saved && saved.crno) return { ok: true, crno: saved.crno, corp_name: saved.corp_name || "", item: null };
+  const bzno = saved && saved.bzno ? saved.bzno : "";
   const base = Fundamentals.commonStockName(stockName);
   let last = { status: "none", candidates: [] };
   for (const name of [...new Set([stockName, base, `${base}(주)`, `(주)${base}`])]) {
     const items = await fetchDataGoKrService(DATAGOKR_CORP_URL, apiKey, { corpNm: name }, 100);
     if (items.length === 0) continue;
-    const pick = Fundamentals.pickCorpMatch(items, stockName);
+    const pick = Fundamentals.pickCorpMatch(items, stockName, { bzno });
     if (pick.status === "one") {
       const ids = loadCorpIds();
-      ids[key] = { crno: pick.crno, corp_name: pick.corp_name };
+      ids[key] = { crno: pick.crno, corp_name: pick.corp_name, ...(bzno ? { bzno } : {}) };
       saveCorpIds(ids);
       return { ok: true, crno: pick.crno, corp_name: pick.corp_name, item: pick.item || null };
     }
     last = pick;
     if (pick.status === "many") break;
   }
-  const list = last.candidates.map((c) => `${c.corp_name}(${c.crno})`).join(", ");
+  // 후보에는 법인등록번호와 함께 사업자번호·시장 구분을 보여 줘서 맞는 법인을 가릴 수 있게 한다
+  const fmtBz = (b) => (b ? `${b.slice(0, 3)}-${b.slice(3, 5)}-${b.slice(5)}` : "");
+  const list = last.candidates.map((c) => `${c.corp_name}[법인등록번호 ${c.crno}${c.bzno ? ` · 사업자 ${fmtBz(c.bzno)}` : ""}${c.market_name ? ` · ${c.market_name}` : ""}]`).join(", ");
   return {
     ok: false,
     message:
       last.status === "many"
-        ? `같은 이름의 법인이 여러 개입니다: ${list}. 직접 입력 > 법인등록번호에 맞는 번호를 넣어 주세요`
-        : `종목명과 같은 법인을 찾지 못했습니다${list ? ` (비슷한 법인: ${list})` : ""}. 직접 입력 > 법인등록번호에 번호를 넣어 주세요`,
+        ? `같은 이름의 법인이 여러 개입니다: ${list}. 직접 입력 > 법인등록번호 칸에 법인등록번호(13자리)나 사업자등록번호(10자리)를 넣어 주세요`
+        : bzno
+          ? `사업자등록번호 ${fmtBz(bzno)}와 같은 법인을 찾지 못했습니다${list ? ` (비슷한 법인: ${list})` : ""}. 번호와 종목명을 확인해 주세요`
+          : `종목명과 같은 법인을 찾지 못했습니다${list ? ` (비슷한 법인: ${list})` : ""}. 직접 입력 > 법인등록번호 칸에 법인등록번호(13자리)나 사업자등록번호(10자리)를 넣어 주세요`,
   };
 }
 
@@ -2382,20 +2390,21 @@ function setupFundamentals() {
     const crnoBtn = event.target.closest('[data-action="fund-crno-save"]');
     if (crnoBtn) {
       const key = crnoBtn.dataset.key;
-      const value = crnoBtn.closest(".fund-crno").querySelector("[data-fund-crno]").value.replace(/[^0-9]/g, "");
+      const num = Fundamentals.parseCorpNumber(crnoBtn.closest(".fund-crno").querySelector("[data-fund-crno]").value);
       const status = statusOf(key);
-      if (value !== "" && value.length !== 13) {
-        if (status) status.textContent = "법인등록번호는 숫자 13자리입니다.";
+      if (num.kind === "invalid") {
+        if (status) status.textContent = "법인등록번호는 숫자 13자리, 사업자등록번호는 숫자 10자리입니다.";
         return;
       }
       const ids = loadCorpIds();
-      if (value === "") delete ids[key];
-      else ids[key] = { crno: value, corp_name: "(직접 입력)" };
+      if (num.kind === "empty") delete ids[key];
+      else if (num.kind === "crno") ids[key] = { crno: num.value, corp_name: "(직접 입력)" };
+      else ids[key] = { bzno: num.value, corp_name: "(사업자번호로 찾는 중)" }; // 사업자번호는 '기업 정보 받기' 때 맞는 법인을 찾아 법인등록번호로 바꾼다
       saveCorpIds(ids);
       openHoldingKeys.add(key);
       render();
       const after = statusOf(key);
-      if (after) after.textContent = value === "" ? "법인등록번호를 지웠습니다(다음 조회 때 다시 찾습니다)." : "법인등록번호를 저장했습니다. '기업 정보 받기'를 누르세요.";
+      if (after) after.textContent = num.kind === "empty" ? "번호를 지웠습니다(다음 조회 때 다시 찾습니다)." : num.kind === "crno" ? "법인등록번호를 저장했습니다. '기업 정보 받기'를 누르세요." : "사업자등록번호를 저장했습니다. '기업 정보 받기'를 누르면 이 번호의 법인을 찾아 연결합니다.";
       return;
     }
     const delBtn = event.target.closest('[data-action="fund-del-year"]');

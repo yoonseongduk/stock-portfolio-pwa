@@ -239,23 +239,47 @@
     return String(stockName || "").replace(/\s*\d?우[A-C]?$/, "");
   }
 
+  /** 사업자등록번호(10자리)에서 숫자만 남긴다. 10자리가 아니면 빈 문자열. */
+  function normalizeBzno(v) {
+    const d = String(v === undefined || v === null ? "" : v).replace(/[^0-9]/g, "");
+    return d.length === 10 ? d : "";
+  }
+
+  /** 입력한 번호 한 개를 종류별로 나눈다: 13자리=법인등록번호(crno), 10자리=사업자등록번호(bzno). */
+  function parseCorpNumber(text) {
+    const d = String(text === undefined || text === null ? "" : text).replace(/[^0-9]/g, "");
+    if (d.length === 13) return { kind: "crno", value: d };
+    if (d.length === 10) return { kind: "bzno", value: d };
+    return { kind: d.length === 0 ? "empty" : "invalid", value: d };
+  }
+
   /**
-   * 기업기본정보 조회 결과에서 종목명과 같은 법인을 고른다.
-   * @returns {{status:'one'|'many'|'none', crno?:string, corp_name?:string, candidates:{crno:string, corp_name:string}[]}}
+   * 기업기본정보 조회 결과에서 종목명과 같은 법인을 고른다. 사업자등록번호(bzno)를 주면 그 번호와 같은 법인만 본다.
+   * @returns {{status:'one'|'many'|'none', crno?:string, corp_name?:string, candidates:{crno:string, corp_name:string, bzno:string, market_name:string, listed:boolean}[]}}
    */
-  function pickCorpMatch(items, stockName) {
+  function pickCorpMatch(items, stockName, opts) {
     const targets = [normalizeCorpName(stockName), normalizeCorpName(commonStockName(stockName))];
+    const wantBzno = normalizeBzno(opts && opts.bzno);
     const all = (Array.isArray(items) ? items : [])
       .filter((it) => it && it.crno && it.corpNm)
-      .map((it) => ({ item: it, crno: String(it.crno), corp_name: String(it.corpNm), listed: ["Y", "K", "N"].includes(String(it.corpRegMrktDcd || "")) || String(it.enpPbanYn || "") === "Y" }));
-    const same = all.filter((c) => targets.includes(normalizeCorpName(c.corp_name)));
+      .map((it) => ({
+        item: it,
+        crno: String(it.crno),
+        corp_name: String(it.corpNm),
+        bzno: normalizeBzno(it.bzno),
+        market_name: String(it.corpRegMrktDcdNm || ""),
+        listed: ["Y", "K", "N"].includes(String(it.corpRegMrktDcd || "")) || String(it.enpPbanYn || "") === "Y",
+      }));
+    // 사업자번호를 알면 이름보다 먼저 그 번호로 좁힌다(같은 이름의 법인이 여러 개일 때)
+    const same = wantBzno ? all.filter((c) => c.bzno === wantBzno) : all.filter((c) => targets.includes(normalizeCorpName(c.corp_name)));
     const pool = same.length > 0 ? same : [];
     const listed = pool.filter((c) => c.listed);
     const use = listed.length > 0 ? listed : pool;
     const uniq = [...new Map(use.map((c) => [c.crno, c])).values()];
-    if (uniq.length === 1) return { status: "one", crno: uniq[0].crno, corp_name: uniq[0].corp_name, item: uniq[0].item, candidates: uniq };
-    if (uniq.length > 1) return { status: "many", candidates: uniq };
-    return { status: "none", candidates: all.slice(0, 5).map(({ crno, corp_name }) => ({ crno, corp_name })) };
+    const brief = ({ crno, corp_name, bzno, market_name, listed }) => ({ crno, corp_name, bzno, market_name, listed });
+    if (uniq.length === 1) return { status: "one", crno: uniq[0].crno, corp_name: uniq[0].corp_name, item: uniq[0].item, candidates: uniq.map(brief) };
+    if (uniq.length > 1) return { status: "many", candidates: uniq.map(brief) };
+    return { status: "none", candidates: all.slice(0, 5).map(brief) };
   }
 
   // ----- 기업 소개(무엇을 하는 기업인지, 주요 제품·매출원) -----
@@ -478,6 +502,8 @@
     parseDataGoKrSummary,
     normalizeCorpName,
     commonStockName,
+    normalizeBzno,
+    parseCorpNumber,
     pickCorpMatch,
     PROFILE_FIELDS,
     parseTwelveProfile,
