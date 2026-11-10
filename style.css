@@ -1173,3 +1173,5 @@ details.help summary {
 .app-header .tab-btn.active { color: #ffffff; background-color: rgba(255, 255, 255, 0.16); }
 .share-summary { display: flex; flex-wrap: wrap; gap: 2px 12px; margin: 2px 0 8px; font-size: 0.82rem; color: #cbd5e1; }
 .hv-active { color: #fcd34d; }
+.signal-rebound_watch { background: #0e7490; }
+.sig-rebound { color: #67e8f9; }

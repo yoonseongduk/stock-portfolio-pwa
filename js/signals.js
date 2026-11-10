@@ -103,6 +103,38 @@
     return null;
   }
 
+  /**
+   * 최근 lookback 거래일 안에 종가가 단기 이동평균선을 아래에서 위로 뚫었고 지금도 위에 있으면 그 시점을 돌려준다.
+   * @returns {{days_ago:number}|null}
+   */
+  function findRecover(closes, shortN, lookback) {
+    const last = closes.length - 1;
+    const smaNow = sma(closes, shortN, last);
+    if (smaNow === null || closes[last] <= smaNow) return null;
+    for (let k = 0; k < lookback; k++) {
+      const idx = last - k;
+      const sNow = sma(closes, shortN, idx);
+      const sPrev = sma(closes, shortN, idx - 1);
+      if (sNow === null || sPrev === null) continue;
+      if (closes[idx - 1] <= sPrev && closes[idx] > sNow) return { days_ago: k };
+    }
+    return null;
+  }
+
+  /**
+   * 최근 lookback 거래일 안에 RSI 가 기준(보통 30) 이하였다가 지금은 기준 위로 올라왔는지(과매도에서 되돌림).
+   * @returns {{days_ago:number, from_rsi:number}|null}
+   */
+  function findRsiRebound(closes, period, level, lookback) {
+    const now = rsi(closes, period);
+    if (now === null || now <= level) return null;
+    for (let k = 1; k <= lookback; k++) {
+      const prev = rsi(closes.slice(0, closes.length - k), period);
+      if (prev !== null && prev <= level) return { days_ago: k - 1, from_rsi: prev };
+    }
+    return null;
+  }
+
   /** 최근 최고 종가와 그 날로부터 구한 추적 손절선(최고 종가 - 배수×ATR). ATR 을 못 구하면 null. */
   function trailingStop(rows, lookback, atrMultiple, atrPeriod) {
     const recent = rows.slice(-lookback);
@@ -189,9 +221,13 @@
       cross: findCross(closes, s.sma_short_period, s.sma_long_period, s.cross_lookback_days),
       trail: trailingStop(rows, s.trail_lookback_days, s.trail_atr_multiple, atrN),
       range: rangePosition(rows, 250),
+      recover: findRecover(closes, s.sma_short_period, s.cross_lookback_days),
+      rsi_rebound: findRsiRebound(closes, s.rsi_period, s.rsi_buy_level, s.cross_lookback_days),
     };
     const buy = [];
     const sell = [];
+    const sellHot = []; // 매도 근거 중 '과열'(상승 쪽) 근거. 이것이 있으면 반등 후보로 보지 않는다
+    const ago = (n) => (n === 0 ? "오늘" : n + "거래일 전");
     if (m.cross && m.cross.kind === "golden") {
       buy.push(`${s.sma_short_period}일선이 ${s.sma_long_period}일선을 위로 뚫음 (골든크로스, ${m.cross.days_ago === 0 ? "오늘" : m.cross.days_ago + "거래일 전"})`);
     }
@@ -199,17 +235,25 @@
       sell.push(`${s.sma_short_period}일선이 ${s.sma_long_period}일선을 아래로 뚫음 (데드크로스, ${m.cross.days_ago === 0 ? "오늘" : m.cross.days_ago + "거래일 전"})`);
     }
     if (isNum(m.rsi) && m.rsi <= s.rsi_buy_level) buy.push(`RSI ${m.rsi.toFixed(1)}로 ${s.rsi_buy_level} 이하 (과매도)`);
-    if (isNum(m.rsi) && m.rsi >= s.rsi_sell_level) sell.push(`RSI ${m.rsi.toFixed(1)}로 ${s.rsi_sell_level} 이상 (과열)`);
+    if (isNum(m.rsi) && m.rsi >= s.rsi_sell_level) {
+      sell.push(`RSI ${m.rsi.toFixed(1)}로 ${s.rsi_sell_level} 이상 (과열)`);
+      sellHot.push(true);
+    }
+    if (m.recover) buy.push(`현재가가 ${s.sma_short_period}일선을 아래에서 위로 뚫고 올라섬 (단기 반등 확인, ${ago(m.recover.days_ago)})`);
+    if (m.rsi_rebound) buy.push(`RSI가 ${s.rsi_buy_level} 이하(${m.rsi_rebound.from_rsi.toFixed(1)})에서 ${s.rsi_buy_level} 위로 되돌림 (과매도 반등, ${ago(m.rsi_rebound.days_ago)})`);
     if (m.trail && last < m.trail.stop_line) {
       sell.push(`추세 이탈: 현재가가 추적 손절선(최근 ${s.trail_lookback_days}일 최고 종가 − ${s.trail_atr_multiple}×ATR)보다 아래`);
     }
+    // 매수 근거만 → 매수 관심, 매도 근거만 → 매도 검토.
+    // 둘 다 있을 때: 매도 근거가 하락 추세(추세 이탈·데드크로스)뿐이면 '반등 후보'(고위험), 과열이 섞이면 중립(엇갈림).
     let state = "neutral";
     if (buy.length > 0 && sell.length === 0) state = "buy_watch";
     else if (sell.length > 0 && buy.length === 0) state = "sell_review";
+    else if (buy.length > 0 && sell.length > 0 && sellHot.length === 0) state = "rebound_watch";
     return { signal_state: state, buy_reasons: buy, sell_reasons: sell, metrics: m, needed_cnt: needed, mixed: buy.length > 0 && sell.length > 0 };
   }
 
-  const isActive = (st) => st === "buy_watch" || st === "sell_review";
+  const isActive = (st) => st === "buy_watch" || st === "sell_review" || st === "rebound_watch";
 
   /**
    * 보유 종목들의 시그널 상태를 갱신하고 새로 알릴 것을 골라낸다.
@@ -238,7 +282,7 @@
         next[h.key] = entry;
         changed = true;
       }
-      if (isActive(state) && entry.signal_ack_state !== state) pending.push({ key: h.key, signal_state: state, reasons: state === "buy_watch" ? result.buy_reasons : result.sell_reasons });
+      if (isActive(state) && entry.signal_ack_state !== state) pending.push({ key: h.key, signal_state: state, reasons: state === "sell_review" ? result.sell_reasons : result.buy_reasons });
     }
     return { signal_map: next, changed, pending };
   }
@@ -272,6 +316,8 @@
     sma,
     rsi,
     findCross,
+    findRecover,
+    findRsiRebound,
     trailingStop,
     trailingStopSeries,
     smaSeries,

@@ -923,7 +923,7 @@ const DEFAULT_HOLDINGS_VIEW = {
   sector_filter: "all", // all | __none | 섹터 이름
   sort_kind: "value", // value | rate | name
   group_kind: "market", // market | sector
-  signal_filter: "all", // all | buy_watch | sell_review
+  signal_filter: "all", // all | buy_watch | rebound_watch | sell_review
   search_text: "",
 };
 
@@ -994,7 +994,7 @@ function loadHoldingsView() {
     if (typeof saved.sector_filter === "string") view.sector_filter = saved.sector_filter;
     if (["value", "rate", "name"].includes(saved.sort_kind)) view.sort_kind = saved.sort_kind;
     if (["market", "sector"].includes(saved.group_kind)) view.group_kind = saved.group_kind;
-    if (["all", "buy_watch", "sell_review"].includes(saved.signal_filter)) view.signal_filter = saved.signal_filter;
+    if (["all", "buy_watch", "rebound_watch", "sell_review"].includes(saved.signal_filter)) view.signal_filter = saved.signal_filter;
     if (typeof saved.search_text === "string") view.search_text = saved.search_text;
   } catch (e) {
     // 저장된 설정을 못 읽으면 기본값으로 시작한다
@@ -1339,7 +1339,7 @@ function renderHoldingsToolbar(allRows, shownCount) {
   const q = document.getElementById("hv-query");
   if (q.value !== v.search_text) q.value = v.search_text;
   // 켜져 있는 필터를 눈에 띄게 알리고 한 번에 풀 수 있게 한다(표시 수가 전체보다 적은 이유를 바로 알 수 있게)
-  const SIGNAL_FILTER_LABEL = { buy_watch: "시그널=매수 관심", sell_review: "시그널=매도 검토" };
+  const SIGNAL_FILTER_LABEL = { buy_watch: "시그널=매수 관심", rebound_watch: "시그널=반등 후보", sell_review: "시그널=매도 검토" };
   const active = [];
   if (v.market_filter !== "all") active.push(v.market_filter === "kr" ? "국장" : "미장");
   if (v.market_filter === "kr" && v.exchange_filter !== "all") active.push({ kospi: "코스피", kosdaq: "코스닥", unknown: "거래소 미분류" }[v.exchange_filter] || v.exchange_filter);
@@ -1888,7 +1888,7 @@ function renderDividends(dividends) {
 // 계산은 js/signals.js(Signals)와 js/glossary.js(Glossary)가 하고, 여기서는 저장·화면·이벤트만 이어 준다.
 const SIGNAL_MAP_KEY = "stockSignals_v2"; // signal_state_map: holding_key -> 시그널 상태
 const SIGNAL_SETTINGS_KEY = "stockSignalSettings_v2"; // signal_settings: 산식 상수(수정 영역)
-const SIGNAL_LABEL = { buy_watch: "매수 관심", sell_review: "매도 검토", neutral: "중립", insufficient: "데이터 부족" };
+const SIGNAL_LABEL = { buy_watch: "매수 관심", rebound_watch: "반등 후보(고위험)", sell_review: "매도 검토", neutral: "중립", insufficient: "데이터 부족" };
 
 function loadSignalMap() {
   try {
@@ -1944,7 +1944,7 @@ function syncSignals(holdings) {
 }
 
 function signalBadgeHtml(signal) {
-  if (!signal || (signal.signal_state !== "buy_watch" && signal.signal_state !== "sell_review")) return "";
+  if (!signal || !["buy_watch", "rebound_watch", "sell_review"].includes(signal.signal_state)) return "";
   return `<span class="signal-badge signal-${signal.signal_state}">${SIGNAL_LABEL[signal.signal_state]}</span>`;
 }
 
@@ -2005,7 +2005,13 @@ function signalSectionHtml(r, ctx) {
       ...sig.sell_reasons.map((x) => `<li class="sig-sell">매도 근거 · ${escapeHtml(x)}</li>`),
     ].join("");
     lines.push(reasonLis ? `<ul class="hd-list">${reasonLis}</ul>` : '<div class="hd-note">지금은 특별한 신호가 없습니다.</div>');
-    if (sig.mixed) lines.push('<div class="hd-note">매수·매도 근거가 엇갈려 중립으로 봅니다.</div>');
+    if (sig.signal_state === "rebound_watch") {
+      lines.push(
+        `<div class="hd-note sig-rebound">하락 추세 속에서 반등 신호가 나온 <strong>반등 후보</strong> ${glossaryBtn("rebound_candidate")}입니다. 추세가 꺾인 상태라 위험이 크므로, 매수 권유가 아니라 지켜볼 후보로만 보세요.</div>`
+      );
+    } else if (sig.mixed) {
+      lines.push('<div class="hd-note">매수·매도 근거가 엇갈려 중립으로 봅니다.</div>');
+    }
     const m = sig.metrics;
     const rg = m.range;
     lines.push(`<div class="sig-metrics">
