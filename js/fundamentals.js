@@ -285,8 +285,10 @@
   function parseCorpProfile(item, nowIso) {
     if (!item || typeof item !== "object") return null;
     const out = { source_kind: "datagokr", collected_at: nowIso, summary_lang: "ko" };
-    const industry = clean(item.sicNm || item.indutyNm || "", 120);
+    // 업종 항목 이름은 공식 문서에 없어 알려진 후보를 차례로 본다. 못 찾으면 받은 항목 이름을 남겨 화면에서 알린다.
+    const industry = clean(item.sicNm || item.indutyNm || item.indutyCdNm || item.enpMainBizNm || item.bzcdNm || item.industryNm || "", 120);
     if (industry) out.industry_name = industry;
+    out.seen_fields = Object.keys(item).slice(0, 40);
     if (item.enpHmpgUrl) out.website_url = clean(item.enpHmpgUrl, 200);
     if (item.enpRprFnm) out.ceo_name = clean(item.enpRprFnm, 80);
     if (item.enpEstbDt) out.established_date = clean(item.enpEstbDt, 20);

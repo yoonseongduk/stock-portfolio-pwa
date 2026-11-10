@@ -2494,12 +2494,15 @@ function profileSectionHtml(r, ctx) {
   const body = view.has_any
     ? `${line("업종", "industry_name")}${summaryHtml}${line("주요 제품·서비스", "main_products")}${line("주요 매출원", "revenue_sources")}${meta ? `<div class="hd-note">${meta}</div>` : ""}`
     : '<div class="hd-note">소개가 없습니다. \'기업 정보 받기\'로 업종·소개를 가져오거나 아래에서 직접 입력하세요.</div>';
+  // 국내 업종 항목이 응답에 없을 때: 받은 항목 이름을 보여 줘 원인을 알 수 있게 한다
+  const autoFields = entry && entry.auto && entry.auto.source_kind === "datagokr" && !(entry.auto.industry_name) ? entry.auto.seen_fields : null;
+  const industryNote = autoFields && !view.industry_name ? `<div class="hd-note">공공데이터포털 기업기본정보에 업종 항목이 없습니다. 업종과 하는 일은 아래에서 직접 입력하거나 CSV로 넣어 주세요. (받은 항목: ${escapeHtml(autoFields.join(", "))})</div>` : "";
   const m = (entry && entry.manual) || {};
   const input = (field, label, rows) =>
     `<label>${label}${rows ? `<textarea rows="${rows}" data-profile-field="${field}">${escapeHtml(m[field] || "")}</textarea>` : `<input type="text" data-profile-field="${field}" value="${escapeHtml(m[field] || "")}" />`}</label>`;
   return `<div class="profile-box">
     <div class="hd-title">이 기업은? ${glossaryBtn("business_profile")}</div>
-    ${body}
+    ${body}${industryNote}
     <details class="help profile-form" data-key="${keyAttr}"><summary>기업 소개 직접 입력</summary>
       <div class="profile-form-grid">
         ${input("industry_name", "업종")}
