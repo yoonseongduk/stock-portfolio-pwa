@@ -2286,7 +2286,8 @@ async function fetchFundamentalsAlpha(stockName) {
   const apiKey = loadFundApiKey();
   const got = {};
   const problems = [];
-  for (const [i, [name, fn]] of [["overview", "OVERVIEW"], ["income", "INCOME_STATEMENT"], ["balance", "BALANCE_SHEET"]].entries()) {
+  // 개요(OVERVIEW: 업종·설명·PER 등)는 무료 키로 제공되지 않아(2026-11 확인) 호출하지 않는다. 발행 주식 수는 재무상태표에서 얻는다.
+  for (const [i, [name, fn]] of [["income", "INCOME_STATEMENT"], ["balance", "BALANCE_SHEET"]].entries()) {
     if (i > 0) await sleep(AV_GAP_MS);
     const run = () => fetchAlphaVantageJson(fn, symbol, apiKey);
     try {
@@ -2477,7 +2478,7 @@ function setupFundamentals() {
           return;
         }
       }
-      if (status) status.textContent = market_kind === "us" ? "기업 정보를 받는 중... (손익·재무상태·통계 3번 조회, 약 20초)" : "기업 정보를 받는 중... (법인 확인 후 재무 조회)";
+      if (status) status.textContent = market_kind === "us" ? (usesAv ? `기업 정보를 받는 중... (손익·재무상태 ${AV_CALLS_PER_STOCK}번 조회, 약 15초)` : "기업 정보를 받는 중... (손익·재무상태·통계·소개 4번 조회, 약 30초)") : "기업 정보를 받는 중... (법인 확인 후 재무 조회)";
       fetchBtn.disabled = true;
       const result = await fetchFundamentalsOne(market_kind, stock_name);
       openHoldingKeys.add(key);
@@ -2866,7 +2867,7 @@ function setupMarketSettings() {
 const FUND_LOG_KEY = "stockFundFetchLog_v1"; // fund_fetch_log: 수집 기록 목록(최근 200건)
 const AV_USAGE_KEY = "stockAvUsage_v1"; // av_usage: Alpha Vantage 오늘 호출 횟수 {date, count}
 const AV_DAILY_LIMIT = 25; // Alpha Vantage 무료 키의 하루 호출 한도
-const AV_CALLS_PER_STOCK = 3; // 종목 하나를 받는 데 쓰는 호출 수(개요·손익·재무상태)
+const AV_CALLS_PER_STOCK = 2; // 종목 하나를 받는 데 쓰는 호출 수(손익·재무상태). 개요(OVERVIEW)는 무료 키로 안 돼서 받지 않는다
 const FUND_PROVIDER_LABEL = { datagokr: "공공데이터포털", alphavantage: "Alpha Vantage", twelvedata: "Twelve Data" };
 
 function loadFundLog() {

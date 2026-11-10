@@ -192,7 +192,8 @@
       put(e.fiscalDateEnding, { sales_amount: avNum(e.totalRevenue), operating_profit_amount: avNum(e.operatingIncome), net_income_amount: avNum(e.netIncome) });
     }
     for (const e of list(balance)) {
-      put(e.fiscalDateEnding, { total_assets_amount: avNum(e.totalAssets), total_liabilities_amount: avNum(e.totalLiabilities), total_equity_amount: avNum(e.totalShareholderEquity) });
+      // 재무상태표에 연도별 발행 주식 수(commonStockSharesOutstanding)가 있어 개요(유료) 없이도 PER·PBR 을 계산할 수 있다
+      put(e.fiscalDateEnding, { total_assets_amount: avNum(e.totalAssets), total_liabilities_amount: avNum(e.totalLiabilities), total_equity_amount: avNum(e.totalShareholderEquity), shares_count: avNum(e.commonStockSharesOutstanding) });
     }
     const summaries = [...byDate.values()]
       .map((v) => normalizeSummary({ ...v, fiscal_year: Number(String(v.fiscal_date).slice(0, 4)), currency_kind: currency, statement_kind: "annual", source_kind: "alphavantage", collected_at: nowIso }))
