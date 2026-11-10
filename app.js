@@ -1154,6 +1154,7 @@ function holdingRowHtml(r, ctx) {
     `<span class="tag">${MARKET_LABEL[market]}</span>`,
     r.exchange_kind ? `<span class="tag">${EXCHANGE_LABEL[r.exchange_kind]}</span>` : "",
     r.sector_name ? `<span class="tag tag-sector">${escapeHtml(r.sector_name)}</span>` : "",
+    alertBadgeHtml(ctx.alertRules[r.key]),
   ].join("");
   const marketTotal = ctx.marketTotals[market] || 0;
   const share = marketTotal > 0 ? ((r.evaluation_amount / marketTotal) * 100).toFixed(1) : "0.0";
@@ -1218,6 +1219,7 @@ function holdingRowHtml(r, ctx) {
           </span>
         </div>
         <div class="holding-item-detail"><span>${MARKET_LABEL[market]} 비중 ${share}%</span></div>
+        ${alertSectionHtml(r, ctx.alertRules[r.key])}
         <div class="hd-section">
           <div class="hd-title">거래내역 ${trades.length}건 <span class="hd-note">(수정·삭제는 거래 탭에서)</span></div>
           <ul class="hd-list">${tradeHtml}</ul>
@@ -1288,7 +1290,7 @@ function renderHoldings(holdings, prices, symbols, info = {}, transactions = [],
   const sectorChoices = [...new Set([...DEFAULT_SECTORS, ...allRows.map((r) => r.sector_name).filter(Boolean)])].sort((a, b) =>
     a.localeCompare(b, "ko")
   );
-  const ctx = { marketTotals, tradesByKey, dividendByKey, sectorChoices, historyByKey: loadPriceHistory() };
+  const ctx = { marketTotals, tradesByKey, dividendByKey, sectorChoices, historyByKey: loadPriceHistory(), alertRules: loadAlertRules() };
 
   const groups = groupHoldingRows(rows, holdingsView);
   const sectorOptions = [...new Set(allRows.map((r) => r.sector_name).filter(Boolean))]
@@ -1765,6 +1767,254 @@ function renderDividends(dividends) {
     .join("");
 }
 
+// ===== 목표가·손절가 알림 (design/10_목표가손절가알림.md) =====
+// 계산은 js/alert_rules.js(AlertRules)가 하고, 여기서는 저장·화면·이벤트만 이어 준다.
+const ALERT_RULES_KEY = "stockAlertRules_v2"; // alert_rule_map: holding_key -> 규칙
+const ALERT_SETTINGS_KEY = "stockAlertSettings_v2"; // alert_settings: 산식 상수(수정 영역)
+
+function loadAlertRules() {
+  try {
+    const raw = localStorage.getItem(ALERT_RULES_KEY);
+    const map = raw ? JSON.parse(raw) : {};
+    return map && typeof map === "object" ? map : {};
+  } catch (e) {
+    console.error("알림 규칙을 읽는 중 오류:", e);
+    return {};
+  }
+}
+
+function saveAlertRules(map) {
+  localStorage.setItem(ALERT_RULES_KEY, JSON.stringify(map));
+}
+
+/** 저장된 설정을 기본값과 합친 값(항상 6개 키가 다 있다). */
+function loadAlertSettings() {
+  try {
+    const raw = localStorage.getItem(ALERT_SETTINGS_KEY);
+    return AlertRules.mergeSettings(raw ? JSON.parse(raw) : {});
+  } catch (e) {
+    return AlertRules.mergeSettings({});
+  }
+}
+
+function saveAlertSettings(settings) {
+  localStorage.setItem(ALERT_SETTINGS_KEY, JSON.stringify(AlertRules.mergeSettings(settings)));
+}
+
+const ALERT_STATE_LABEL = { hit_target: "목표가 도달", hit_stop: "손절가 이탈" };
+
+// 보유 종목의 규칙을 맞추고(없으면 자동 생성, 낡은 자동 규칙은 다시 계산) 상태를 판정한다. 바뀌었을 때만 저장한다.
+function syncAlerts(holdings, prices) {
+  const keyed = holdings.map((h) => ({ ...h, key: holdingKey(h.market_kind, h.stock_name) }));
+  const result = AlertRules.evaluateAlerts(
+    loadAlertRules(),
+    keyed,
+    prices,
+    loadPriceHistory(),
+    loadAlertSettings(),
+    new Date().toISOString()
+  );
+  if (result.changed) saveAlertRules(result.rule_map);
+  return result;
+}
+
+function alertBadgeHtml(rule) {
+  if (!rule || !ALERT_STATE_LABEL[rule.alert_state]) return "";
+  return `<span class="alert-badge alert-${rule.alert_state}">${ALERT_STATE_LABEL[rule.alert_state]}</span>`;
+}
+
+// 현황 화면 위쪽 배너: 확인하지 않은 알림만 보인다.
+function renderAlertBanner(pending) {
+  const area = document.getElementById("alert-banner-area");
+  if (!area) return;
+  if (pending.length === 0) {
+    area.innerHTML = "";
+    return;
+  }
+  const rules = loadAlertRules();
+  const prices = loadPrices();
+  const items = pending
+    .map(({ key, alert_state }) => {
+      const { market_kind, stock_name } = splitHoldingKey(key);
+      const rule = rules[key] || {};
+      const level = alert_state === "hit_target" ? rule.target_price : rule.stop_price;
+      const levelLabel = alert_state === "hit_target" ? "목표가" : "손절가";
+      return `<div class="alert-item" data-key="${escapeHtml(key)}">
+        <span class="alert-badge alert-${alert_state}">${ALERT_STATE_LABEL[alert_state]}</span>
+        <span class="alert-item-text"><strong>${escapeHtml(stock_name)}</strong>
+          <small>현재 ${formatMoney(prices[key] || 0, market_kind)} · ${levelLabel} ${formatMoney(level, market_kind)}</small></span>
+        <button type="button" class="fetch-btn" data-action="alert-go">보기</button>
+        <button type="button" class="fetch-btn" data-action="alert-ack">확인</button>
+      </div>`;
+    })
+    .join("");
+  area.innerHTML = `<div class="card alert-banner">
+    <div class="alert-banner-head"><strong>알림 ${pending.length}건</strong>
+      <button type="button" class="fetch-btn" data-action="alert-ack-all">모두 확인</button></div>
+    ${items}</div>`;
+}
+
+// 종목 상세의 목표가·손절가 영역. 평균단가는 r.h.average_price, 현재가는 r.currentPrice.
+function alertSectionHtml(r, rule) {
+  if (!rule) return "";
+  const market = r.h.market_kind;
+  const avg = r.h.average_price;
+  const key = escapeHtml(r.key);
+  const row = (level, label, price) => {
+    const note = price
+      ? `평단 대비 ${formatPercent(AlertRules.pctFromAverage(price, avg))}` +
+        (r.currentPrice ? ` · 현재가에서 ${formatPercent(price / r.currentPrice - 1)}` : "")
+      : "사용 안 함 (칸을 비워 둠)";
+    return `<div class="alert-level-row">
+      <span>${label}</span>
+      <input class="alert-level-input" type="text" inputmode="decimal" data-action="alert-level" data-level="${level}" data-key="${key}"
+        value="${price ? AlertRules.roundPrice(market, price) : ""}" placeholder="가격 또는 ${level === "target" ? "+20%" : "-10%"}" />
+      <button type="button" class="fetch-btn" data-action="alert-step" data-level="${level}" data-delta="-0.05" data-key="${key}">−5%p</button>
+      <button type="button" class="fetch-btn" data-action="alert-step" data-level="${level}" data-delta="0.05" data-key="${key}">＋5%p</button>
+      <span class="alert-level-note">${note}</span>
+    </div>`;
+  };
+  const ratio = loadAlertSettings().reward_risk_ratio;
+  const sourceNote =
+    rule.rule_kind === "manual"
+      ? `직접 정함 <button type="button" class="fetch-btn" data-action="alert-auto" data-key="${key}">자동으로 되돌리기</button>`
+      : `자동 권장값 (${rule.calc_kind === "atr" ? "변동성 ATR 기준" : "시세 기록이 적어 고정 비율"}, 손익비 1:${ratio})`;
+  return `<div class="hd-section alert-section">
+    <div class="hd-title">목표가·손절가 ${alertBadgeHtml(rule)} <span class="hd-note">${sourceNote}</span></div>
+    ${row("target", "목표가", rule.target_price)}
+    ${row("stop", "손절가", rule.stop_price)}
+    <div class="hd-note">값을 직접 고치면 그 종목은 '직접 정함'이 됩니다. 가격(85000)이나 평단 대비 비율(+25%, -8%)로 쓸 수 있습니다.</div>
+  </div>`;
+}
+
+function findHoldingByKey(key) {
+  return computeHoldings(loadTransactions()).find((h) => holdingKey(h.market_kind, h.stock_name) === key);
+}
+
+// 목표가 또는 손절가 하나를 바꿔 저장한다. 평단과 어긋나면 확인을 받는다(D22). 저장했으면 true.
+function applyLevelChange(key, level, newPrice) {
+  const h = findHoldingByKey(key);
+  const rules = loadAlertRules();
+  const rule = rules[key];
+  if (!h || !rule) return false;
+  const target = level === "target" ? newPrice : rule.target_price;
+  const stop = level === "stop" ? newPrice : rule.stop_price;
+  const warnings = AlertRules.levelWarnings(h.average_price, target, stop);
+  if (warnings.length > 0 && !window.confirm(`${warnings.join("\n")}\n그래도 이 값으로 저장할까요?`)) return false;
+  rules[key] = AlertRules.applyManualLevels(rule, target, stop, new Date().toISOString());
+  saveAlertRules(rules);
+  return true;
+}
+
+function setupAlertActions() {
+  const holdingsArea = document.getElementById("holdings-area");
+  const bannerArea = document.getElementById("alert-banner-area");
+
+  holdingsArea.addEventListener("change", (event) => {
+    const input = event.target.closest('[data-action="alert-level"]');
+    if (!input) return;
+    const key = input.dataset.key;
+    const h = findHoldingByKey(key);
+    if (h) {
+      const parsed = AlertRules.parseLevelInput(input.value, h.average_price, h.market_kind, input.dataset.level);
+      if (!parsed.ok) setFetchStatus(parsed.error);
+      else applyLevelChange(key, input.dataset.level, parsed.price);
+    }
+    render();
+  });
+
+  holdingsArea.addEventListener("click", (event) => {
+    const step = event.target.closest('[data-action="alert-step"]');
+    if (step) {
+      const key = step.dataset.key;
+      const h = findHoldingByKey(key);
+      const rule = loadAlertRules()[key];
+      if (h && rule) {
+        const current = step.dataset.level === "target" ? rule.target_price : rule.stop_price;
+        const basePct = AlertRules.pctFromAverage(current, h.average_price);
+        if (basePct !== null) {
+          const price = AlertRules.roundPrice(h.market_kind, h.average_price * (1 + basePct + Number(step.dataset.delta)));
+          if (price > 0) applyLevelChange(key, step.dataset.level, price);
+        } else {
+          setFetchStatus("값이 비어 있습니다. 가격이나 비율을 먼저 쓰세요.");
+        }
+      }
+      render();
+      return;
+    }
+    const auto = event.target.closest('[data-action="alert-auto"]');
+    if (auto) {
+      const rules = loadAlertRules();
+      delete rules[auto.dataset.key]; // 규칙을 지우면 render 가 권장값으로 다시 만든다(알림 확인 기록은 초기화)
+      saveAlertRules(rules);
+      render();
+    }
+  });
+
+  bannerArea.addEventListener("click", (event) => {
+    const rules = loadAlertRules();
+    if (event.target.closest('[data-action="alert-ack-all"]')) {
+      Object.keys(rules).forEach((k) => (rules[k] = AlertRules.acknowledgeAlert(rules[k])));
+      saveAlertRules(rules);
+      render();
+      return;
+    }
+    const item = event.target.closest(".alert-item");
+    if (!item) return;
+    const key = item.dataset.key;
+    if (event.target.closest('[data-action="alert-ack"]')) {
+      rules[key] = AlertRules.acknowledgeAlert(rules[key]);
+      saveAlertRules(rules);
+      render();
+    } else if (event.target.closest('[data-action="alert-go"]')) {
+      openHoldingKeys.add(key);
+      showScreen("holdings");
+      renderHoldingsOnly();
+    }
+  });
+}
+
+// 설정 화면: 산식 상수 6개(수정 영역). 퍼센트 값은 화면에서는 %로, 저장은 소수(0.1)로 한다.
+const ALERT_SETTING_FIELDS = [
+  { name: "default_stop_rate", label: "고정 손절폭 (%, 시세 기록이 적을 때)", percent: true },
+  { name: "reward_risk_ratio", label: "손익비 (목표폭 = 손절폭 × 이 값)" },
+  { name: "atr_period", label: "ATR 기간 (거래일)" },
+  { name: "atr_multiple", label: "ATR 배수 (손절폭 = 배수 × ATR)" },
+  { name: "min_stop_rate", label: "손절폭 하한 (%)", percent: true },
+  { name: "max_stop_rate", label: "손절폭 상한 (%)", percent: true },
+];
+
+function renderAlertSettings() {
+  const area = document.getElementById("alert-settings-area");
+  if (!area) return;
+  const s = loadAlertSettings();
+  area.innerHTML = ALERT_SETTING_FIELDS.map((f) => {
+    const shown = f.percent ? Math.round(s[f.name] * 1000) / 10 : s[f.name];
+    return `<label>${f.label}<input type="number" step="any" min="0" data-alert-setting="${f.name}" value="${shown}" /></label>`;
+  }).join("");
+}
+
+function setupAlertSettings() {
+  renderAlertSettings();
+  document.getElementById("alert-settings-area").addEventListener("change", (event) => {
+    const input = event.target.closest("[data-alert-setting]");
+    if (!input) return;
+    const field = ALERT_SETTING_FIELDS.find((f) => f.name === input.dataset.alertSetting);
+    const value = Number(input.value);
+    const next = loadAlertSettings();
+    if (Number.isFinite(value) && value > 0) next[field.name] = field.percent ? value / 100 : value;
+    saveAlertSettings(next);
+    renderAlertSettings(); // 잘못된 값은 이전 값으로 되돌려 보인다
+    render();
+  });
+  document.getElementById("alert-settings-reset").addEventListener("click", () => {
+    localStorage.removeItem(ALERT_SETTINGS_KEY);
+    renderAlertSettings();
+    render();
+  });
+}
+// ===== 목표가·손절가 알림 END =====
+
 function render() {
   const transactions = loadTransactions();
   const prices = loadPrices();
@@ -1772,6 +2022,7 @@ function render() {
   const holdings = computeHoldings(transactions);
   autoFillSectors(holdings); // 분류한 적 없는 종목에 이름 규칙으로 섹터를 채운다
   renderKnownStockNames(transactions);
+  renderAlertBanner(syncAlerts(holdings, prices).pending); // 목표가·손절가 규칙 맞춤·판정 (보유 화면보다 먼저)
 
   renderDashboard(holdings, prices);
   renderShare(holdings, prices);
@@ -2744,6 +2995,8 @@ function collectBackupData() {
     price_history_map: loadPriceHistory(),
     dividend_list: loadDividends(),
     stock_info_map: loadStockInfo(),
+    alert_rule_map: loadAlertRules(),
+    alert_settings: loadAlertSettings(),
     us_price_api_key: loadApiKey(),
     kr_price_api_key: loadKrApiKey(),
   };
@@ -2778,11 +3031,14 @@ async function handleJsonImportFile(file) {
   if (data.price_history_map && typeof data.price_history_map === "object") savePriceHistory(data.price_history_map);
   if (Array.isArray(data.dividend_list)) saveDividends(data.dividend_list);
   if (data.stock_info_map && typeof data.stock_info_map === "object") saveStockInfo(data.stock_info_map);
+  if (data.alert_rule_map && typeof data.alert_rule_map === "object") saveAlertRules(data.alert_rule_map);
+  if (data.alert_settings && typeof data.alert_settings === "object") saveAlertSettings(data.alert_settings);
   if (typeof data.us_price_api_key === "string") saveApiKey(data.us_price_api_key);
   if (typeof data.kr_price_api_key === "string") saveKrApiKey(data.kr_price_api_key);
 
   document.getElementById("api-key-input").value = loadApiKey();
   document.getElementById("kr-api-key-input").value = loadKrApiKey();
+  renderAlertSettings();
 
   render();
   setJsonStatus("백업을 불러왔습니다.");
@@ -3012,6 +3268,8 @@ migrateOldHoldingsIfNeeded();
 setupSettings();
 setupForm();
 setupHoldingsActions();
+setupAlertActions();
+setupAlertSettings();
 setupRefreshAll();
 setupBulkSymbols();
 setupHoldingsView();

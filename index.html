@@ -21,6 +21,7 @@
   <main id="screen-area">
     <!-- 현황 -->
     <section class="screen" data-screen="home" hidden>
+      <div id="alert-banner-area"></div>
       <div class="card dashboard-card">
         <div id="dashboard-area">
           <p class="empty-message">아직 보유 중인 종목이 없습니다.</p>
@@ -107,6 +108,12 @@
           <p class="empty-message">아직 보유 중인 종목이 없습니다.</p>
         </div>
       </div>
+      <details class="card alert-settings-card">
+        <summary>🎯 목표가·손절가 기준 (수정 가능)</summary>
+        <p class="hint-text">기본은 시장에서 흔히 쓰는 방식입니다: 손절가 = 평균단가 − 2×ATR(14일 평균 진폭, 시세 기록이 부족하면 −10%), 목표가는 손익비 1:2. 아래 값을 바꾸면 자동으로 정한 종목의 목표가·손절가가 새 기준으로 다시 계산됩니다(직접 고친 종목은 그대로).</p>
+        <div id="alert-settings-area" class="alert-settings-grid"></div>
+        <button type="button" class="fetch-btn" id="alert-settings-reset">기본값으로 되돌리기</button>
+      </details>
     </section>
 
     <!-- 거래 -->
@@ -316,6 +323,7 @@
   <datalist id="known-stock-names"></datalist>
 
   <script src="./version.js"></script>
+  <script src="./js/alert_rules.js"></script>
   <script src="./app.js"></script>
 </body>
 </html>

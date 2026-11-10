@@ -13,6 +13,7 @@ const CACHE_FILES = [
   "./index.html",
   "./style.css",
   "./version.js",
+  "./js/alert_rules.js",
   "./app.js",
   "./manifest.json",
 ];

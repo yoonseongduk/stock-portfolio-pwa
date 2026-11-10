@@ -1120,3 +1120,21 @@ details.help summary {
   color: #e2e8f0;
   font-size: 12px;
 }
+
+/* ===== 목표가·손절가 알림 (design/10_목표가손절가알림.md) ===== */
+.alert-banner { border-left: 4px solid #facc15; }
+.alert-banner-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+.alert-item { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 6px 0; border-top: 1px solid #1e293b; }
+.alert-item-text { flex: 1 1 180px; }
+.alert-item-text small { display: block; color: #94a3b8; }
+.alert-badge { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 0.72rem; font-weight: 700; color: #fff; }
+.alert-hit_target { background: #e66767; } /* 상승(목표 도달): 한국 관행 빨강 */
+.alert-hit_stop { background: #3987e5; } /* 하락(손절 이탈): 파랑 */
+.alert-level-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 6px 0; }
+.alert-level-row > span:first-child { min-width: 3.4em; }
+.alert-level-input { width: 7.5em; padding: 4px 6px; background: #0f172a; color: #e2e8f0; border: 1px solid #334155; border-radius: 6px; }
+.alert-level-note { color: #94a3b8; font-size: 0.78rem; flex: 1 1 100%; }
+.alert-settings-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; margin: 8px 0; }
+.alert-settings-grid label { display: flex; flex-direction: column; gap: 3px; font-size: 0.82rem; color: #cbd5e1; }
+.alert-settings-grid input { padding: 5px 6px; background: #0f172a; color: #e2e8f0; border: 1px solid #334155; border-radius: 6px; }
+#alert-banner-area:empty { display: none; } /* 빈 영역이 화면 간격(gap)을 차지하지 않게 */
