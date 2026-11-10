@@ -247,15 +247,140 @@
     const targets = [normalizeCorpName(stockName), normalizeCorpName(commonStockName(stockName))];
     const all = (Array.isArray(items) ? items : [])
       .filter((it) => it && it.crno && it.corpNm)
-      .map((it) => ({ crno: String(it.crno), corp_name: String(it.corpNm), listed: ["Y", "K", "N"].includes(String(it.corpRegMrktDcd || "")) || String(it.enpPbanYn || "") === "Y" }));
+      .map((it) => ({ item: it, crno: String(it.crno), corp_name: String(it.corpNm), listed: ["Y", "K", "N"].includes(String(it.corpRegMrktDcd || "")) || String(it.enpPbanYn || "") === "Y" }));
     const same = all.filter((c) => targets.includes(normalizeCorpName(c.corp_name)));
     const pool = same.length > 0 ? same : [];
     const listed = pool.filter((c) => c.listed);
     const use = listed.length > 0 ? listed : pool;
     const uniq = [...new Map(use.map((c) => [c.crno, c])).values()];
-    if (uniq.length === 1) return { status: "one", crno: uniq[0].crno, corp_name: uniq[0].corp_name, candidates: uniq };
+    if (uniq.length === 1) return { status: "one", crno: uniq[0].crno, corp_name: uniq[0].corp_name, item: uniq[0].item, candidates: uniq };
     if (uniq.length > 1) return { status: "many", candidates: uniq };
     return { status: "none", candidates: all.slice(0, 5).map(({ crno, corp_name }) => ({ crno, corp_name })) };
+  }
+
+  // ----- 기업 소개(무엇을 하는 기업인지, 주요 제품·매출원) -----
+  // 자동(auto: 데이터 제공처)과 직접 입력(manual) 두 층으로 저장하고, 화면에서는 항목별로 직접 입력이 자동을 덮는다.
+  const PROFILE_FIELDS = ["industry_name", "business_summary", "main_products", "revenue_sources", "website_url"];
+  const clean = (v, max) => {
+    const t = String(v === undefined || v === null ? "" : v).replace(/\s+/g, " ").trim();
+    return t.slice(0, max || 3000);
+  };
+
+  /** Twelve Data /profile 응답 → 자동 소개. 설명과 업종이 모두 없으면 null. 설명은 영어이므로 summary_lang 에 en 을 남긴다. */
+  function parseTwelveProfile(res, nowIso) {
+    if (!res || typeof res !== "object") return null;
+    const industry = [res.sector, res.industry].map((x) => clean(x, 80)).filter(Boolean).join(" / ");
+    const summary = clean(res.description, 2000);
+    if (!industry && !summary) return null;
+    const out = { source_kind: "twelvedata", collected_at: nowIso, summary_lang: "en" };
+    if (industry) out.industry_name = industry;
+    if (summary) out.business_summary = summary;
+    if (res.website) out.website_url = clean(res.website, 200);
+    if (res.CEO) out.ceo_name = clean(res.CEO, 80);
+    if (Number.isFinite(Number(res.employees))) out.employees_count = Number(res.employees);
+    return out;
+  }
+
+  /** 기업기본정보 한 행 → 자동 소개(업종·홈페이지·대표자·설립일). 읽을 값이 없으면 null. */
+  function parseCorpProfile(item, nowIso) {
+    if (!item || typeof item !== "object") return null;
+    const out = { source_kind: "datagokr", collected_at: nowIso, summary_lang: "ko" };
+    const industry = clean(item.sicNm || item.indutyNm || "", 120);
+    if (industry) out.industry_name = industry;
+    if (item.enpHmpgUrl) out.website_url = clean(item.enpHmpgUrl, 200);
+    if (item.enpRprFnm) out.ceo_name = clean(item.enpRprFnm, 80);
+    if (item.enpEstbDt) out.established_date = clean(item.enpEstbDt, 20);
+    return out.industry_name || out.website_url || out.ceo_name || out.established_date ? out : null;
+  }
+
+  /**
+   * 소개 한 층을 넣는다. 자동은 통째로 바꾸고(null 이면 그대로), 직접 입력은 넘긴 항목만 바꾼다(빈 문자열은 그 항목 삭제).
+   * @param {Record<string, {auto?:object, manual?:object}>} map
+   */
+  function setProfileLayer(map, key, layer, fields) {
+    const next = { ...(map || {}) };
+    const entry = { ...(next[key] || {}) };
+    if (layer === "auto") {
+      if (!fields) return map || {};
+      entry.auto = fields;
+    } else {
+      const manual = { ...(entry.manual || {}) };
+      for (const f of PROFILE_FIELDS) {
+        if (fields[f] === undefined) continue;
+        const v = clean(fields[f], f === "business_summary" || f === "main_products" || f === "revenue_sources" ? 1500 : 200);
+        if (v === "") delete manual[f];
+        else manual[f] = v;
+      }
+      if (Object.keys(manual).length) entry.manual = manual;
+      else delete entry.manual;
+      if (Object.keys(manual).length) entry.manual_at = fields.manual_at || entry.manual_at;
+    }
+    if (!entry.auto && !entry.manual) delete next[key];
+    else next[key] = entry;
+    return next;
+  }
+
+  /**
+   * 화면에 보일 소개: 항목마다 직접 입력이 있으면 그것, 없으면 자동 값. sources 에 항목별 출처(manual/auto)를 담는다.
+   * @returns {{industry_name?:string, business_summary?:string, main_products?:string, revenue_sources?:string, website_url?:string, ceo_name?:string, established_date?:string, summary_lang?:string, sources:Record<string,string>, has_any:boolean}}
+   */
+  function profileView(entry) {
+    const view = { sources: {}, has_any: false };
+    if (!entry) return view;
+    for (const f of PROFILE_FIELDS) {
+      if (entry.manual && entry.manual[f]) {
+        view[f] = entry.manual[f];
+        view.sources[f] = "manual";
+      } else if (entry.auto && entry.auto[f]) {
+        view[f] = entry.auto[f];
+        view.sources[f] = "auto";
+      }
+    }
+    if (entry.auto) {
+      ["ceo_name", "established_date"].forEach((f) => {
+        if (entry.auto[f]) view[f] = entry.auto[f];
+      });
+      if (view.sources.business_summary === "auto") view.summary_lang = entry.auto.summary_lang;
+      view.auto_source = entry.auto.source_kind;
+    }
+    view.has_any = PROFILE_FIELDS.some((f) => view[f]);
+    return view;
+  }
+
+  const PROFILE_CSV_HEADER = ["구분", "종목명", "업종", "한 줄 설명", "주요 제품·서비스", "주요 매출원", "홈페이지"];
+  const PROFILE_CSV_FIELDS = ["industry_name", "business_summary", "main_products", "revenue_sources", "website_url"];
+
+  /** 직접 입력한 소개를 CSV 줄 목록(머리글 포함)으로. keys: 내보낼 종목 키(market|name). */
+  function toProfileCsvRows(map, keys) {
+    const rows = [PROFILE_CSV_HEADER];
+    for (const key of keys) {
+      const view = profileView((map || {})[key]);
+      if (!view.has_any) continue;
+      const sep = key.indexOf("|");
+      rows.push([key.slice(0, sep) === "us" ? "미국" : "국내", key.slice(sep + 1), ...PROFILE_CSV_FIELDS.map((f) => view[f] || "")]);
+    }
+    return rows;
+  }
+
+  /** CSV 줄(머리글 제외) → 직접 입력 소개. 빈 칸은 그 항목을 건드리지 않는다. */
+  function fromProfileCsvRows(rows) {
+    const items = [];
+    const errors = [];
+    rows.forEach((cols, idx) => {
+      const lineNo = idx + 2;
+      if (cols.every((c) => String(c).trim() === "")) return;
+      const [marketLabel, name, ...vals] = cols.map((c) => String(c === undefined ? "" : c).trim());
+      const market = MARKET_LABEL_TO_KIND[marketLabel];
+      if (!market) return errors.push(`${lineNo}줄: 구분은 "국내" 또는 "미국"`);
+      if (!name) return errors.push(`${lineNo}줄: 종목명 없음`);
+      const fields = {};
+      PROFILE_CSV_FIELDS.forEach((f, i) => {
+        if ((vals[i] || "") !== "") fields[f] = vals[i];
+      });
+      if (Object.keys(fields).length === 0) return errors.push(`${lineNo}줄: 소개 내용이 모두 비어 있습니다`);
+      items.push({ key: `${market}|${name}`, fields });
+    });
+    return { items, errors };
   }
 
   /**
@@ -352,6 +477,13 @@
     normalizeCorpName,
     commonStockName,
     pickCorpMatch,
+    PROFILE_FIELDS,
+    parseTwelveProfile,
+    parseCorpProfile,
+    setProfileLayer,
+    profileView,
+    toProfileCsvRows,
+    fromProfileCsvRows,
     appendValuation,
     formatBigAmount,
     toCsvRows,

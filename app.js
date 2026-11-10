@@ -762,16 +762,16 @@ function renderDashboard(holdings, prices) {
 
       return `
         <div class="stat-tile">
-          <div class="stat-label">${MARKET_LABEL[market]} 평가금액</div>
-          <div class="stat-value">${formatMoney(totalEval, market)}</div>
-          <div class="stat-delta ${profitClass(totalProfit)}">${formatMoney(totalProfit, market)} (${formatPercent(totalRate)})</div>
+          <div class="stat-label">${MARKET_LABEL[market]} 평가금액${market === "us" && usView().krw ? " (원화 환산)" : ""}</div>
+          <div class="stat-value">${showMoney(totalEval, market)}</div>
+          <div class="stat-delta ${profitClass(totalProfit)}">${showMoney(totalProfit, market)} (${formatPercent(totalRate)})</div>
         </div>
       `;
     })
     .join("");
 
   area.innerHTML = tilesHtml
-    ? `<div class="stat-grid">${fxTotalTileHtml(holdings, prices)}${tilesHtml}</div>`
+    ? `<div class="stat-grid">${fxTotalTileHtml(holdings, prices)}${tilesHtml}</div>${holdings.some((h) => h.market_kind === "us") ? usToggleHtml() : ""}`
     : '<p class="empty-message">아직 보유 중인 종목이 없습니다.</p>';
 }
 
@@ -791,10 +791,12 @@ function groupStatsHtml(items, marketKind) {
     else if (c.profit_amount < 0) lose++;
   });
   const profit = evaluation - buy;
+  const us = marketKind === "us" ? usView() : { krw: false, rate: 1 }; // 미국 블록은 선택에 따라 원화 환산으로 보여 준다
+  const money = (v) => (us.krw ? formatMoney(v * us.rate, "kr") : formatMoney(v, marketKind));
   return `<div class="share-summary">
     <span>${items.length}종목</span>
-    <span>평가 ${formatMoney(evaluation, marketKind)}</span>
-    <span class="${profitClass(profit)}">손익 ${formatMoney(profit, marketKind)} (${formatPercent(buy === 0 ? 0 : profit / buy)})</span>
+    <span>평가 ${money(evaluation)}</span>
+    <span class="${profitClass(profit)}">손익 ${money(profit)} (${formatPercent(buy === 0 ? 0 : profit / buy)})</span>
     <span><span class="${profitClass(1)}">이익 ${win}</span> · <span class="${profitClass(-1)}">손실 ${lose}</span></span>
   </div>`;
 }
@@ -842,7 +844,7 @@ function renderShare(holdings, prices) {
             <div class="legend-row">
               <span class="legend-swatch" style="background-color:${s.color}"></span>
               <span class="legend-name">${s.stock_name}</span>
-              <span class="legend-value">${pct.toFixed(1)}% · ${formatMoney(s.evaluation_amount, market)}</span>
+              <span class="legend-value">${pct.toFixed(1)}% · ${showMoney(s.evaluation_amount, market)}</span>
             </div>
           `;
         })
@@ -1439,7 +1441,7 @@ function renderHoldings(holdings, prices, symbols, info = {}, transactions = [],
   const sectorChoices = [...new Set([...DEFAULT_SECTORS, ...allRows.map((r) => r.sector_name).filter(Boolean)])].sort((a, b) =>
     a.localeCompare(b, "ko")
   );
-  const ctx = { marketTotals, tradesByKey, dividendByKey, sectorChoices, historyByKey: historyMap, signalSettings, atrPeriod, alertRules: loadAlertRules(), weightOver: computeWeightOver(allRows), fundMap: fundMapAll, valHistory: loadValuations(), sharesMap: loadListedShares(), corpIds: loadCorpIds() };
+  const ctx = { marketTotals, tradesByKey, dividendByKey, sectorChoices, historyByKey: historyMap, signalSettings, atrPeriod, alertRules: loadAlertRules(), weightOver: computeWeightOver(allRows), fundMap: fundMapAll, valHistory: loadValuations(), profiles: loadProfiles(), sharesMap: loadListedShares(), corpIds: loadCorpIds() };
 
   const groups = groupHoldingRows(rows, holdingsView);
   const sectorOptions = [...new Set(allRows.map((r) => r.sector_name).filter(Boolean))]
@@ -2105,6 +2107,7 @@ function fundamentalsSectionHtml(r, ctx) {
   return `<div class="hd-section fund-section">
     <div class="hd-title">기업 브리핑 ${glossaryBtn("fundamentals")} <span class="hd-note">결산 재무 · 참고용</span> ${fetchBtn}</div>
     <div class="fund-status hd-note" data-key="${keyAttr}"></div>
+    ${profileSectionHtml(r, ctx)}
     ${body}${form}
   </div>`;
 }
@@ -2148,7 +2151,7 @@ async function fetchDataGoKrService(url, apiKey, query, numOfRows) {
 async function resolveCorpId(stockName, apiKey) {
   const key = holdingKey("kr", stockName);
   const saved = loadCorpIds()[key];
-  if (saved && saved.crno) return { ok: true, crno: saved.crno, corp_name: saved.corp_name || "" };
+  if (saved && saved.crno) return { ok: true, crno: saved.crno, corp_name: saved.corp_name || "", item: null };
   const base = Fundamentals.commonStockName(stockName);
   let last = { status: "none", candidates: [] };
   for (const name of [...new Set([stockName, base, `${base}(주)`, `(주)${base}`])]) {
@@ -2159,7 +2162,7 @@ async function resolveCorpId(stockName, apiKey) {
       const ids = loadCorpIds();
       ids[key] = { crno: pick.crno, corp_name: pick.corp_name };
       saveCorpIds(ids);
-      return { ok: true, crno: pick.crno, corp_name: pick.corp_name };
+      return { ok: true, crno: pick.crno, corp_name: pick.corp_name, item: pick.item || null };
     }
     last = pick;
     if (pick.status === "many") break;
@@ -2181,8 +2184,18 @@ async function fetchFundamentalsKR(stockName) {
   try {
     const corp = await resolveCorpId(stockName, apiKey);
     if (!corp.ok) return corp;
+    // 기업 소개(업종·홈페이지 등): 법인 조회 결과를 쓰고, 번호만 저장돼 있고 소개가 없으면 한 번 더 조회한다. 소개는 보조라 실패해도 재무 조회는 계속한다.
+    let profileSaved = false;
+    try {
+      let item = corp.item;
+      const hasAuto = (loadProfiles()[key] || {}).auto;
+      if (!item && !hasAuto) item = (await fetchDataGoKrService(DATAGOKR_CORP_URL, apiKey, { crno: corp.crno }, 10))[0];
+      profileSaved = saveAutoProfile(key, Fundamentals.parseCorpProfile(item, new Date().toISOString()));
+    } catch (e) {
+      profileSaved = false;
+    }
     const items = await fetchDataGoKrService(DATAGOKR_FIN_URL, apiKey, { crno: corp.crno }, 100);
-    if (items.length === 0) return { ok: false, message: "이 법인의 재무 정보가 없습니다(신규 상장이거나 아직 공시되지 않았을 수 있습니다). 직접 입력·CSV로 넣을 수 있습니다" };
+    if (items.length === 0) return { ok: profileSaved, years: 0, added: 0, problems: [], profile: profileSaved, message: "이 법인의 재무 정보가 없습니다(신규 상장이거나 아직 공시되지 않았을 수 있습니다). 직접 입력·CSV로 넣을 수 있습니다" };
     const parsed = Fundamentals.parseDataGoKrSummary(items, new Date().toISOString());
     if (parsed.summaries.length === 0) {
       return { ok: false, message: `응답에서 재무 항목을 읽지 못했습니다 (받은 항목: ${parsed.seen_fields.slice(0, 12).join(", ")}${parsed.missing.length ? ` / 못 찾은 항목: ${parsed.missing.join(", ")}` : ""})` };
@@ -2195,7 +2208,7 @@ async function fetchFundamentalsKR(stockName) {
       if (r.added) added++;
     });
     saveFundamentals(map);
-    return { ok: true, years: parsed.summaries.length, added, problems: [] };
+    return { ok: true, years: parsed.summaries.length, added, problems: [], profile: profileSaved };
   } catch (e) {
     return { ok: false, message: e.message };
   }
@@ -2215,7 +2228,7 @@ async function fetchFundamentalsUS(stockName) {
   if (!apiKey) return { ok: false, message: "Twelve Data API 키가 설정에 없습니다" };
   const got = {};
   const problems = [];
-  for (const [i, [name, path]] of [["income", "income_statement"], ["balance", "balance_sheet"], ["stats", "statistics"]].entries()) {
+  for (const [i, [name, path]] of [["income", "income_statement"], ["balance", "balance_sheet"], ["stats", "statistics"], ["profile", "profile"]].entries()) {
     if (i > 0) await sleep(REFRESH_GAP_MS.us);
     const run = () => fetchTwelveDataJson(path, symbol, apiKey);
     try {
@@ -2231,7 +2244,8 @@ async function fetchFundamentalsUS(stockName) {
     }
   }
   const parsed = Fundamentals.parseTwelveData(got.income || null, got.balance || null, got.stats || null, new Date().toISOString());
-  if (parsed.summaries.length === 0 && !parsed.valuation) {
+  const profileSaved = saveAutoProfile(key, got.profile ? Fundamentals.parseTwelveProfile(got.profile, new Date().toISOString()) : null);
+  if (parsed.summaries.length === 0 && !parsed.valuation && !profileSaved) {
     const plan = problems.some((p) => /plan|upgrade|grow|pro|available|subscription|403/i.test(p)) ? " (무료 플랜에서는 제공되지 않는 항목일 수 있습니다. 직접 입력·CSV로 넣을 수 있습니다)" : "";
     return { ok: false, message: (problems[0] || "받은 정보가 없습니다") + plan };
   }
@@ -2244,7 +2258,7 @@ async function fetchFundamentalsUS(stockName) {
   });
   saveFundamentals(map);
   if (parsed.valuation) saveValuations(Fundamentals.appendValuation(loadValuations(), key, parsed.valuation));
-  return { ok: true, years: parsed.summaries.length, added, problems };
+  return { ok: true, years: parsed.summaries.length, added, problems, profile: profileSaved };
 }
 
 let fundamentalsRunning = false;
@@ -2329,7 +2343,7 @@ function setupFundamentals() {
       const after = statusOf(key);
       if (after) {
         after.textContent = result.ok
-          ? `기업 정보 ${result.years}개 연도를 받았습니다 (새 연도 ${result.added}건)${result.problems.length ? ` · 일부 실패: ${result.problems[0]}` : ""}`
+          ? (result.years > 0 ? `기업 정보 ${result.years}개 연도를 받았습니다 (새 연도 ${result.added}건)` : "기업 소개만 받았습니다 (재무는 받지 못했습니다)") + (result.profile ? " · 기업 소개 반영" : "") + (result.problems.length ? ` · 일부 실패: ${result.problems[0]}` : "")
           : `받지 못했습니다: ${result.message}`;
       }
       return;
@@ -2433,6 +2447,193 @@ function setupFundamentals() {
   });
 }
 // ===== 기업 현황 브리핑 END =====
+
+// ===== 기업 소개 (design/14_기업소개와통화표시.md) =====
+// 계산은 js/fundamentals.js(Fundamentals)가 하고, 여기서는 저장·수집·화면·이벤트만 이어 준다.
+const PROFILES_KEY = "stockCompanyProfiles_v2"; // company_profile_map: holding_key -> {auto, manual}
+
+function loadProfiles() {
+  try {
+    const map = JSON.parse(localStorage.getItem(PROFILES_KEY) || "{}");
+    return map && typeof map === "object" ? map : {};
+  } catch (e) {
+    return {};
+  }
+}
+function saveProfiles(map) {
+  localStorage.setItem(PROFILES_KEY, JSON.stringify(map));
+}
+// 자동으로 받은 소개를 저장한다(직접 입력은 건드리지 않는다).
+function saveAutoProfile(key, fields) {
+  if (!fields) return false;
+  saveProfiles(Fundamentals.setProfileLayer(loadProfiles(), key, "auto", fields));
+  return true;
+}
+
+const PROFILE_SOURCE_LABEL = { twelvedata: "Twelve Data", datagokr: "공공데이터포털" };
+
+// 종목 상세 '기업 브리핑' 위쪽의 '이 기업은?' 상자: 업종, 하는 일, 주요 제품·서비스, 주요 매출원.
+function profileSectionHtml(r, ctx) {
+  const key = r.key;
+  const keyAttr = escapeHtml(key);
+  const entry = ctx.profiles[key];
+  const view = Fundamentals.profileView(entry);
+  const tag = (field) => (view.sources[field] === "manual" ? '<span class="hd-note">(직접 입력)</span>' : view.sources[field] === "auto" ? `<span class="hd-note">(${PROFILE_SOURCE_LABEL[view.auto_source] || "자동"})</span>` : "");
+  const line = (label, field, extra) =>
+    view[field] ? `<div class="profile-row"><span class="profile-label">${label}</span><span>${escapeHtml(view[field])} ${tag(field)}${extra || ""}</span></div>` : "";
+  let summaryHtml = "";
+  if (view.business_summary) {
+    const text = view.business_summary;
+    const note = view.sources.business_summary === "auto" && view.summary_lang === "en" ? ' <span class="hd-note">(영어 원문 · 한글로 바꾸려면 아래 직접 입력)</span>' : "";
+    summaryHtml =
+      text.length > 150
+        ? `<div class="profile-row"><span class="profile-label">하는 일</span><details class="profile-more"><summary>${escapeHtml(text.slice(0, 110))}… ${tag("business_summary")}</summary>${escapeHtml(text)}${note}</details></div>`
+        : `<div class="profile-row"><span class="profile-label">하는 일</span><span>${escapeHtml(text)} ${tag("business_summary")}${note}</span></div>`;
+  }
+  const meta = [view.ceo_name ? `대표 ${escapeHtml(view.ceo_name)}` : "", view.established_date ? `설립 ${escapeHtml(view.established_date)}` : "", view.website_url ? `홈페이지 ${escapeHtml(view.website_url)}` : ""].filter(Boolean).join(" · ");
+  const body = view.has_any
+    ? `${line("업종", "industry_name")}${summaryHtml}${line("주요 제품·서비스", "main_products")}${line("주요 매출원", "revenue_sources")}${meta ? `<div class="hd-note">${meta}</div>` : ""}`
+    : '<div class="hd-note">소개가 없습니다. \'기업 정보 받기\'로 업종·소개를 가져오거나 아래에서 직접 입력하세요.</div>';
+  const m = (entry && entry.manual) || {};
+  const input = (field, label, rows) =>
+    `<label>${label}${rows ? `<textarea rows="${rows}" data-profile-field="${field}">${escapeHtml(m[field] || "")}</textarea>` : `<input type="text" data-profile-field="${field}" value="${escapeHtml(m[field] || "")}" />`}</label>`;
+  return `<div class="profile-box">
+    <div class="hd-title">이 기업은? ${glossaryBtn("business_profile")}</div>
+    ${body}
+    <details class="help profile-form" data-key="${keyAttr}"><summary>기업 소개 직접 입력</summary>
+      <div class="profile-form-grid">
+        ${input("industry_name", "업종")}
+        ${input("business_summary", "한 줄 설명 (무엇을 하는 기업인지)", 2)}
+        ${input("main_products", "주요 제품·서비스", 2)}
+        ${input("revenue_sources", "주요 매출원 (무엇으로 돈을 버는지)", 2)}
+        ${input("website_url", "홈페이지")}
+      </div>
+      <button type="button" class="fetch-btn" data-action="profile-save" data-key="${keyAttr}">저장</button>
+      <button type="button" class="fetch-btn" data-action="profile-clear" data-key="${keyAttr}">직접 입력 지우기</button>
+      <span class="hd-note profile-status"></span>
+      <div class="hd-note">직접 입력한 항목은 자동으로 받은 값보다 우선합니다. 칸을 비우고 저장하면 그 항목은 자동 값으로 돌아갑니다.</div>
+    </details>
+  </div>`;
+}
+
+function setProfileCsvStatus(text) {
+  const el = document.getElementById("profile-csv-status");
+  if (el) el.textContent = text;
+}
+
+function buildProfileCsv(map, holdings) {
+  const keys = new Set([...Object.keys(map), ...holdings.map((h) => holdingKey(h.market_kind, h.stock_name))]);
+  const sorted = [...keys].sort((a, b) => (a.slice(0, 2) === b.slice(0, 2) ? a.localeCompare(b, "ko") : a < b ? -1 : 1));
+  return Fundamentals.toProfileCsvRows(map, sorted)
+    .map((cols) => cols.map(csvEscape).join(","))
+    .join("\r\n");
+}
+
+async function handleProfileCsvImportFile(file) {
+  const BOM = String.fromCharCode(0xfeff);
+  const text = (await file.text()).replace(new RegExp("^" + BOM), "");
+  const rows = parseCsv(text);
+  if (rows.length <= 1) {
+    setProfileCsvStatus("가져올 내용이 없습니다 (빈 파일이거나 머리글만 있음).");
+    return;
+  }
+  const { items, errors } = Fundamentals.fromProfileCsvRows(rows.slice(1));
+  let map = loadProfiles();
+  items.forEach(({ key, fields }) => {
+    map = Fundamentals.setProfileLayer(map, key, "manual", fields);
+  });
+  saveProfiles(map);
+  render();
+  setProfileCsvStatus(`${items.length}줄 적용` + (errors.length > 0 ? ` · ${errors.length}줄 건너뜀 (${errors.slice(0, 5).join(", ")}${errors.length > 5 ? " 외" : ""})` : ""));
+}
+
+function setupProfiles() {
+  const area = document.getElementById("holdings-area");
+  area.addEventListener("click", (event) => {
+    const save = event.target.closest('[data-action="profile-save"]');
+    const clear = event.target.closest('[data-action="profile-clear"]');
+    if (!save && !clear) return;
+    const key = (save || clear).dataset.key;
+    const form = (save || clear).closest(".profile-form");
+    const fields = {};
+    form.querySelectorAll("[data-profile-field]").forEach((el) => {
+      fields[el.dataset.profileField] = clear ? "" : el.value;
+    });
+    saveProfiles(Fundamentals.setProfileLayer(loadProfiles(), key, "manual", fields));
+    openHoldingKeys.add(key);
+    render();
+    const after = [...document.querySelectorAll(".profile-form")].find((f) => f.dataset.key === key);
+    if (after) after.querySelector(".profile-status").textContent = clear ? "직접 입력을 지웠습니다." : "저장했습니다.";
+  });
+  document.getElementById("profile-export-csv-btn").addEventListener("click", () => {
+    const csv = buildProfileCsv(loadProfiles(), computeHoldings(loadTransactions()));
+    downloadTextFile(`기업소개_${todayISO()}.csv`, String.fromCharCode(0xfeff) + csv, "text/csv;charset=utf-8");
+    setProfileCsvStatus("기업 소개 CSV 파일을 내보냈습니다.");
+  });
+  const fileInput = document.getElementById("profile-import-csv-file");
+  document.getElementById("profile-import-csv-btn").addEventListener("click", () => fileInput.click());
+  fileInput.addEventListener("change", async () => {
+    const file = fileInput.files[0];
+    if (!file) return;
+    await handleProfileCsvImportFile(file);
+    fileInput.value = "";
+  });
+}
+// ===== 기업 소개 END =====
+
+// ===== 미국 금액 달러·원화 표시 전환 (design/14_기업소개와통화표시.md) =====
+const US_DISPLAY_KEY = "stockUsDisplay_v1"; // us_display_kind: "usd" | "krw" (화면 설정이라 전체 백업에는 넣지 않음)
+
+// 지금 미국 금액을 원화로 보여 줄지. 원화를 골랐어도 환율이 없으면 달러로 보여 준다.
+function usView() {
+  let wantKrw = false;
+  try {
+    wantKrw = localStorage.getItem(US_DISPLAY_KEY) === "krw";
+  } catch (e) {
+    wantKrw = false;
+  }
+  const fx = loadFxRate();
+  const rate = fx ? Number(fx.krw_per_usd) : 0;
+  if (wantKrw && rate > 0) return { krw: true, rate, wantKrw };
+  return { krw: false, rate: 1, wantKrw };
+}
+
+// 시장에 맞는 금액 표기. 미국은 선택에 따라 달러 또는 원화 환산으로 보여 준다.
+function showMoney(value, marketKind) {
+  if (marketKind === "us") {
+    const v = usView();
+    if (v.krw) return formatMoney(value * v.rate, "kr");
+  }
+  return formatMoney(value, marketKind);
+}
+
+function usToggleHtml() {
+  const v = usView();
+  const fx = loadFxRate();
+  const note = v.krw
+    ? `원화 = 달러 × ${v.rate.toLocaleString("ko-KR")}원 (${escapeHtml(fx.krw_per_usd_date || "")} 환율, 환차손익 제외)`
+    : v.wantKrw
+      ? "환율이 없어 달러로 보입니다. 위쪽 '환율 가져오기'를 눌러 주세요."
+      : "미국 평가금액을 원화로도 볼 수 있습니다.";
+  return `<div class="us-display"><span class="hd-note">미국 금액 표시</span>
+    <button type="button" class="chip ${v.krw ? "" : "active"}" data-action="us-display" data-val="usd">달러($)</button>
+    <button type="button" class="chip ${v.krw ? "active" : ""}" data-action="us-display" data-val="krw">원화(₩)</button>
+    <span class="hd-note">${note}</span></div>`;
+}
+
+function setupUsDisplay() {
+  document.getElementById("dashboard-area").addEventListener("click", (event) => {
+    const btn = event.target.closest('[data-action="us-display"]');
+    if (!btn) return;
+    try {
+      localStorage.setItem(US_DISPLAY_KEY, btn.dataset.val === "krw" ? "krw" : "usd");
+    } catch (e) {
+      // 저장소를 못 쓰면 이번 화면에서만 바뀌지 않는다
+    }
+    render();
+  });
+}
+// ===== 미국 금액 표시 END =====
 
 // ===== 재무 건강·기업 이벤트·종합 판단 (design/13_재무시그널과기업이벤트.md) =====
 // 계산은 js/fund_signals.js(FundSignals)가 하고, 여기서는 저장·화면·이벤트만 이어 준다.
@@ -4181,6 +4382,7 @@ function collectBackupData() {
     valuation_history_map: loadValuations(),
     listed_shares_map: loadListedShares(),
     corp_id_map: loadCorpIds(),
+    company_profile_map: loadProfiles(),
     fund_event_map: loadFundEvents(),
     fund_signal_settings: loadFundSignalSettings(),
     us_price_api_key: loadApiKey(),
@@ -4225,6 +4427,7 @@ async function handleJsonImportFile(file) {
   if (data.valuation_history_map && typeof data.valuation_history_map === "object") saveValuations(data.valuation_history_map);
   if (data.listed_shares_map && typeof data.listed_shares_map === "object") localStorage.setItem(SHARES_KEY, JSON.stringify(data.listed_shares_map));
   if (data.corp_id_map && typeof data.corp_id_map === "object") saveCorpIds(data.corp_id_map);
+  if (data.company_profile_map && typeof data.company_profile_map === "object") saveProfiles(data.company_profile_map);
   if (data.fund_event_map && typeof data.fund_event_map === "object") saveFundEvents(data.fund_event_map);
   if (data.fund_signal_settings && typeof data.fund_signal_settings === "object") saveFundSignalSettings(data.fund_signal_settings);
   if (typeof data.us_price_api_key === "string") saveApiKey(data.us_price_api_key);
@@ -4502,6 +4705,8 @@ setupAlertSettings();
 setupSignalActions();
 setupSignalSettings();
 setupFundamentals();
+setupProfiles();
+setupUsDisplay();
 setupFundSignals();
 setupFundSignalSettings();
 setupGlossary();

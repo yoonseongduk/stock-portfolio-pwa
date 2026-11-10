@@ -1218,3 +1218,13 @@ details.help summary {
 .fund-combined-good { background: rgba(21, 128, 61, 0.2); }
 .fund-combined-warn { background: rgba(180, 83, 9, 0.2); }
 .fund-combined-info { background: rgba(71, 85, 105, 0.3); }
+
+/* ===== 기업 소개·미국 금액 표시 (design/14_기업소개와통화표시.md) ===== */
+.profile-box { background: #0b1220; border: 1px solid #1e293b; border-radius: 8px; padding: 8px; margin: 6px 0; }
+.profile-row { display: flex; gap: 8px; padding: 3px 0; font-size: 0.88rem; line-height: 1.45; }
+.profile-label { flex: 0 0 5.6em; color: #94a3b8; font-size: 0.78rem; padding-top: 1px; }
+.profile-more summary { cursor: pointer; }
+.profile-form-grid { display: grid; grid-template-columns: 1fr; gap: 6px; margin: 6px 0; }
+.profile-form-grid label { display: flex; flex-direction: column; gap: 2px; font-size: 0.78rem; color: #cbd5e1; }
+.profile-form-grid input, .profile-form-grid textarea { padding: 4px 6px; background: #0f172a; color: #e2e8f0; border: 1px solid #334155; border-radius: 6px; font-family: inherit; }
+.us-display { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; }
