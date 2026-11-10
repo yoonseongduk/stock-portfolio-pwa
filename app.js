@@ -2146,6 +2146,10 @@ function setFundManageStatus(text) {
   const el = document.getElementById("fund-manage-status");
   if (el) el.textContent = text;
 }
+function setFundCsvStatus(text) {
+  const el = document.getElementById("fund-csv-status");
+  if (el) el.textContent = text;
+}
 
 function buildFundamentalsCsv(map, holdings) {
   const keys = new Set([...Object.keys(map), ...holdings.map((h) => holdingKey(h.market_kind, h.stock_name))]);
@@ -2160,7 +2164,7 @@ async function handleFundamentalsCsvImportFile(file) {
   const text = (await file.text()).replace(new RegExp("^" + BOM), "");
   const rows = parseCsv(text);
   if (rows.length <= 1) {
-    setFundManageStatus("가져올 내용이 없습니다 (빈 파일이거나 머리글만 있음).");
+    setFundCsvStatus("가져올 내용이 없습니다 (빈 파일이거나 머리글만 있음).");
     return;
   }
   const { items, errors } = Fundamentals.fromCsvRows(rows.slice(1), new Date().toISOString());
@@ -2173,7 +2177,7 @@ async function handleFundamentalsCsvImportFile(file) {
   });
   saveFundamentals(map);
   render();
-  setFundManageStatus(
+  setFundCsvStatus(
     `${items.length}줄 적용 (새 연도 ${added}건)` + (errors.length > 0 ? ` · ${errors.length}줄 건너뜀 (${errors.slice(0, 5).join(", ")}${errors.length > 5 ? " 외" : ""})` : "")
   );
 }
@@ -2269,7 +2273,7 @@ function setupFundamentals() {
   document.getElementById("fund-export-csv-btn").addEventListener("click", () => {
     const csv = buildFundamentalsCsv(loadFundamentals(), computeHoldings(loadTransactions()));
     downloadTextFile(`기업재무_${todayISO()}.csv`, String.fromCharCode(0xfeff) + csv, "text/csv;charset=utf-8");
-    setFundManageStatus("기업 재무 CSV 파일을 내보냈습니다.");
+    setFundCsvStatus("기업 재무 CSV 파일을 내보냈습니다.");
   });
   const fileInput = document.getElementById("fund-import-csv-file");
   document.getElementById("fund-import-csv-btn").addEventListener("click", () => fileInput.click());
