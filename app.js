@@ -2235,14 +2235,27 @@ async function fetchFundamentalsKR(stockName) {
   }
 }
 
-// 시장에 맞는 출처로 한 종목의 기업 정보를 받는다.
-function fetchFundamentalsOne(marketKind, stockName) {
-  return marketKind === "kr" ? fetchFundamentalsKR(stockName) : fetchFundamentalsUS(stockName);
+// 시장에 맞는 출처로 한 종목의 기업 정보를 받고 결과를 수집 기록에 남긴다.
+async function fetchFundamentalsOne(marketKind, stockName) {
+  const provider = marketKind === "kr" ? "datagokr" : loadFundApiKey() ? "alphavantage" : "twelvedata";
+  const result = await (marketKind === "kr" ? fetchFundamentalsKR(stockName) : fetchFundamentalsUS(stockName));
+  appendFundLog({
+    at: new Date().toISOString(),
+    key: holdingKey(marketKind, stockName),
+    provider,
+    ok: Boolean(result.ok),
+    years: result.years || 0,
+    added: result.added || 0,
+    profile: Boolean(result.profile),
+    message: result.ok ? "" : String(result.message || ""),
+  });
+  return result;
 }
 
 // ----- 미국: Alpha Vantage (무료 키, 하루 25회). Twelve Data 무료 플랜은 재무 항목을 주지 않는다 -----
 async function fetchAlphaVantageJson(fn, symbol, apiKey) {
   const params = new URLSearchParams({ function: fn, symbol, apikey: apiKey });
+  addAvUsage(1); // 한도 확인용으로 이 기기에서 호출 횟수를 센다
   const res = await fetch(`https://www.alphavantage.co/query?${params.toString()}`);
   const data = await res.json();
   if (data["Error Message"]) throw new Error("종목을 찾지 못했습니다(시세 코드(티커)를 확인하세요)");
@@ -2253,6 +2266,7 @@ async function fetchAlphaVantageJson(fn, symbol, apiKey) {
     if (/per day|daily|25 requests/i.test(note)) {
       e.message = "Alpha Vantage 하루 한도(25회)에 도달했습니다. 내일 다시 받으세요";
       e.daily_limit = true;
+      setAvUsageFull();
     } else if (/premium/i.test(note)) {
       e.message = "Alpha Vantage 무료 키로는 제공되지 않는 항목입니다";
     } else {
@@ -2363,13 +2377,19 @@ async function fetchFundamentalsAll() {
     return latest && latest.collected_at && Date.now() - Date.parse(latest.collected_at) < 30 * 24 * 3600 * 1000 && ["twelvedata", "datagokr"].includes(latest.source_kind);
   };
   // 국내(호출 제한이 느슨함)를 먼저, 미국(분당 8회 제한)은 뒤에서 천천히. 시세 코드가 있는 종목만, 최근 30일 안에 받은 종목은 건너뜀
-  const targets = computeHoldings(loadTransactions())
-    .filter((h) => symbols[holdingKey(h.market_kind, h.stock_name)] && !recently(holdingKey(h.market_kind, h.stock_name)))
+  const holdingsAll = computeHoldings(loadTransactions()).filter((h) => symbols[holdingKey(h.market_kind, h.stock_name)]);
+  const fromLog = holdingsAll.filter((h) => todayFundLog(holdingKey(h.market_kind, h.stock_name))).length; // 오늘 이미 받은 종목은 다시 받지 않고 기록으로 대신한다
+  const targets = holdingsAll
+    .filter((h) => !recently(holdingKey(h.market_kind, h.stock_name)) && !todayFundLog(holdingKey(h.market_kind, h.stock_name)))
     .sort((a, b) => (a.market_kind === b.market_kind ? 0 : a.market_kind === "kr" ? -1 : 1));
   const failed = [];
   let filled = 0;
   let stopped = false;
   for (let i = 0; i < targets.length; i++) {
+    if (targets[i].market_kind === "us" && loadFundApiKey() && !/ETF|ETN/i.test(targets[i].stock_name) && avCallsLeft() < AV_CALLS_PER_STOCK) {
+      stopped = true; // 오늘 남은 횟수로는 한 종목(3회)을 다 받을 수 없다
+      break;
+    }
     setFundManageStatus(`기업 정보 받는 중... (${i + 1}/${targets.length}) ${targets[i].stock_name}`);
     const result = await fetchFundamentalsOne(targets[i].market_kind, targets[i].stock_name);
     if (result.ok) filled++;
@@ -2381,7 +2401,7 @@ async function fetchFundamentalsAll() {
     const gap = targets[i].market_kind === "us" && loadFundApiKey() ? AV_GAP_MS : REFRESH_GAP_MS[targets[i].market_kind] ?? 0;
     if (i < targets.length - 1) await sleep(gap);
   }
-  return { target_cnt: targets.length, filled, failed, stopped };
+  return { target_cnt: targets.length, filled, failed, stopped, from_log: fromLog };
 }
 
 function setFundManageStatus(text) {
@@ -2437,6 +2457,26 @@ function setupFundamentals() {
       const key = fetchBtn.dataset.key;
       const { market_kind, stock_name } = splitHoldingKey(key);
       const status = statusOf(key);
+      const prior = todayFundLog(key);
+      const usesAv = market_kind === "us" && Boolean(loadFundApiKey());
+      if (prior) {
+        const again = window.confirm(
+          `${stock_name}은(는) 오늘 ${localTimeOf(prior.at)}에 이미 받았습니다 (${FUND_PROVIDER_LABEL[prior.provider] || prior.provider}, ${describeFundLog(prior)}).\n` +
+            (usesAv ? `또 받으면 Alpha Vantage 하루 한도 ${AV_CALLS_PER_STOCK}회를 더 씁니다 (오늘 ${loadAvUsage().count}/${AV_DAILY_LIMIT}회 사용).\n` : "다시 받으면 조회를 한 번 더 합니다.\n") +
+            "다시 받을까요? (취소하면 오늘 받은 기록을 그대로 보여 줍니다)"
+        );
+        if (!again) {
+          if (status) status.textContent = `오늘 ${localTimeOf(prior.at)}에 받은 기록입니다: ${describeFundLog(prior)} (${FUND_PROVIDER_LABEL[prior.provider] || prior.provider}). 다시 받으려면 '기업 정보 받기'를 눌러 확인하세요`;
+          return;
+        }
+      }
+      if (usesAv && !/ETF|ETN/i.test(stock_name) && avCallsLeft() < AV_CALLS_PER_STOCK) {
+        const go = window.confirm(`오늘 Alpha Vantage 호출을 ${loadAvUsage().count}/${AV_DAILY_LIMIT}회 썼습니다(남은 ${avCallsLeft()}회). 이 종목은 ${AV_CALLS_PER_STOCK}회가 필요해 도중에 멈출 수 있습니다. 그래도 받을까요?`);
+        if (!go) {
+          if (status) status.textContent = "오늘 남은 Alpha Vantage 호출 횟수가 부족해 받지 않았습니다. 내일 다시 받으세요";
+          return;
+        }
+      }
       if (status) status.textContent = market_kind === "us" ? "기업 정보를 받는 중... (손익·재무상태·통계 3번 조회, 약 20초)" : "기업 정보를 받는 중... (법인 확인 후 재무 조회)";
       fetchBtn.disabled = true;
       const result = await fetchFundamentalsOne(market_kind, stock_name);
@@ -2527,8 +2567,8 @@ function setupFundamentals() {
       const shown = r.failed.slice(0, 2).join(", ") + (r.failed.length > 2 ? ` 외 ${r.failed.length - 2}개` : "");
       setFundManageStatus(
         r.target_cnt === 0
-          ? "받을 종목이 없습니다 (시세 코드가 없거나 최근 30일 안에 받은 종목은 건너뜁니다)."
-          : `기업 정보 ${r.filled}종목 받음` + (r.failed.length > 0 ? ` · 실패 ${r.failed.length}개 (${shown})` : "") + (r.stopped ? " · Alpha Vantage 하루 한도로 중단했습니다. 남은 종목은 내일 다시 누르면 이어서 받습니다(받은 종목은 건너뜀)" : "")
+          ? `받을 종목이 없습니다 (시세 코드가 없거나 최근 30일 안에 받은 종목은 건너뜁니다${r.from_log ? `, 오늘 이미 받은 ${r.from_log}종목은 기록으로 대신합니다` : ""}).`
+          : `기업 정보 ${r.filled}종목 받음` + (r.failed.length > 0 ? ` · 실패 ${r.failed.length}개 (${shown})` : "") + (r.stopped ? " · Alpha Vantage 하루 한도로 중단했습니다. 남은 종목은 내일 다시 누르면 이어서 받습니다(받은 종목은 건너뜀)" : "") + (r.from_log ? ` · 오늘 이미 받은 ${r.from_log}종목은 다시 받지 않고 기록으로 대신했습니다` : "")
       );
     } finally {
       fundamentalsRunning = false;
@@ -2820,6 +2860,88 @@ function setupMarketSettings() {
   });
 }
 // ===== 시장 상태 점검 END =====
+
+// ===== 기업 정보 수집 기록·한도 사용량 (design/12_기업현황브리핑.md §12) =====
+// 같은 날 이미 받은 종목은 다시 받기 전에 확인을 묻고, 취소하면 기록된 결과를 보여 준다. 결과는 저장소(localStorage)에 남고 별도 파일이 필요 없다.
+const FUND_LOG_KEY = "stockFundFetchLog_v1"; // fund_fetch_log: 수집 기록 목록(최근 200건)
+const AV_USAGE_KEY = "stockAvUsage_v1"; // av_usage: Alpha Vantage 오늘 호출 횟수 {date, count}
+const AV_DAILY_LIMIT = 25; // Alpha Vantage 무료 키의 하루 호출 한도
+const AV_CALLS_PER_STOCK = 3; // 종목 하나를 받는 데 쓰는 호출 수(개요·손익·재무상태)
+const FUND_PROVIDER_LABEL = { datagokr: "공공데이터포털", alphavantage: "Alpha Vantage", twelvedata: "Twelve Data" };
+
+function loadFundLog() {
+  try {
+    const list = JSON.parse(localStorage.getItem(FUND_LOG_KEY) || "[]");
+    return Array.isArray(list) ? list : [];
+  } catch (e) {
+    return [];
+  }
+}
+function saveFundLog(list) {
+  localStorage.setItem(FUND_LOG_KEY, JSON.stringify(list.slice(-200)));
+}
+function appendFundLog(entry) {
+  saveFundLog([...loadFundLog(), entry]);
+}
+// 로컬 날짜(YYYY-MM-DD)
+function localDateOf(iso) {
+  const d = new Date(iso);
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+function localTimeOf(iso) {
+  const d = new Date(iso);
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+// 오늘 성공적으로 받은 마지막 기록(없으면 null)
+function todayFundLog(key) {
+  const today = todayISO();
+  return [...loadFundLog()].reverse().find((e) => e.key === key && e.ok && localDateOf(e.at) === today) || null;
+}
+function describeFundLog(e) {
+  const parts = [];
+  if (e.years > 0) parts.push(`${e.years}개 연도(새 연도 ${e.added || 0}건)`);
+  if (e.profile) parts.push("기업 소개");
+  return parts.length ? parts.join(" · ") : "받은 항목 없음";
+}
+
+function loadAvUsage() {
+  try {
+    const u = JSON.parse(localStorage.getItem(AV_USAGE_KEY) || "{}");
+    return u && u.date === todayISO() && Number.isFinite(u.count) ? u : { date: todayISO(), count: 0 };
+  } catch (e) {
+    return { date: todayISO(), count: 0 };
+  }
+}
+function addAvUsage(n) {
+  const u = loadAvUsage();
+  localStorage.setItem(AV_USAGE_KEY, JSON.stringify({ date: u.date, count: u.count + n }));
+}
+function setAvUsageFull() {
+  localStorage.setItem(AV_USAGE_KEY, JSON.stringify({ date: todayISO(), count: AV_DAILY_LIMIT }));
+}
+function avCallsLeft() {
+  return Math.max(0, AV_DAILY_LIMIT - loadAvUsage().count);
+}
+
+// 보유 화면 '기업 정보 관리'의 수집 기록(최근 12건)과 Alpha Vantage 오늘 사용량
+function renderFundLog() {
+  const area = document.getElementById("fund-log-area");
+  if (!area) return;
+  const list = loadFundLog().slice(-12).reverse();
+  const used = loadAvUsage().count;
+  const rows = list
+    .map((e) => {
+      const name = splitHoldingKey(e.key).stock_name;
+      const when = `${localDateOf(e.at).slice(5)} ${localTimeOf(e.at)}`;
+      return `<li class="${e.ok ? "fl-ok" : "fl-fail"}">${when} · ${escapeHtml(name)} · ${FUND_PROVIDER_LABEL[e.provider] || e.provider} · ${e.ok ? describeFundLog(e) : "실패: " + escapeHtml((e.message || "").slice(0, 80))}</li>`;
+    })
+    .join("");
+  area.innerHTML = `<div class="hd-note">Alpha Vantage 오늘 사용 ${used}/${AV_DAILY_LIMIT}회 (종목당 ${AV_CALLS_PER_STOCK}회 · 이 기기에서 센 값이라 실제와 다를 수 있음)</div>
+    ${rows ? `<details class="help"><summary>수집 기록 (최근 ${list.length}건)</summary><ul class="hd-list fund-log-list">${rows}</ul></details>` : '<div class="hd-note">아직 수집 기록이 없습니다.</div>'}`;
+}
+// ===== 기업 정보 수집 기록 END =====
 
 // ===== 재무 건강·기업 이벤트·종합 판단 (design/13_재무시그널과기업이벤트.md) =====
 // 계산은 js/fund_signals.js(FundSignals)가 하고, 여기서는 저장·화면·이벤트만 이어 준다.
@@ -3598,6 +3720,7 @@ function render() {
   renderAlertBanner(syncAlerts(holdings, prices).pending); // 목표가·손절가 규칙 맞춤·판정 (보유 화면보다 먼저)
   renderSignalBanner(syncSignals(holdings).pending); // 시세 시그널 변경 알림
   renderFundEventBanner(syncFundEvents(holdings, prices).pending); // 기업 이벤트(재무·가치 구간) 알림
+  renderFundLog(); // 기업 정보 수집 기록·Alpha Vantage 사용량
 
   renderDashboard(holdings, prices);
   renderShare(holdings, prices);
@@ -4579,6 +4702,8 @@ function collectBackupData() {
     listed_shares_map: loadListedShares(),
     corp_id_map: loadCorpIds(),
     company_profile_map: loadProfiles(),
+    fund_fetch_log: loadFundLog(),
+    av_usage: loadAvUsage(),
     market_status_settings: loadMarketSettings(),
     fund_event_map: loadFundEvents(),
     fund_signal_settings: loadFundSignalSettings(),
@@ -4627,6 +4752,7 @@ async function handleJsonImportFile(file) {
   if (data.corp_id_map && typeof data.corp_id_map === "object") saveCorpIds(data.corp_id_map);
   if (data.company_profile_map && typeof data.company_profile_map === "object") saveProfiles(data.company_profile_map);
   if (data.market_status_settings && typeof data.market_status_settings === "object") saveMarketSettings(data.market_status_settings);
+  if (Array.isArray(data.fund_fetch_log)) saveFundLog(data.fund_fetch_log);
   if (data.fund_event_map && typeof data.fund_event_map === "object") saveFundEvents(data.fund_event_map);
   if (data.fund_signal_settings && typeof data.fund_signal_settings === "object") saveFundSignalSettings(data.fund_signal_settings);
   if (typeof data.us_price_api_key === "string") saveApiKey(data.us_price_api_key);

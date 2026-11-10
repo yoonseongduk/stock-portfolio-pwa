@@ -1236,3 +1236,6 @@ details.help summary {
 .market-section { border-left: 3px solid #475569; padding-left: 8px; }
 .fund-key-label { display: flex; flex-direction: column; gap: 3px; font-size: 0.82rem; color: #cbd5e1; margin-top: 8px; }
 .fund-key-label input { padding: 6px 8px; background: #0f172a; color: #e2e8f0; border: 1px solid #334155; border-radius: 6px; }
+.fund-log-list li { font-size: 0.8rem; }
+.fl-ok { color: #cbd5e1; }
+.fl-fail { color: #fca5a5; }
