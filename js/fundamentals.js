@@ -15,7 +15,7 @@
     "total_equity_amount", // 자본총계
     "shares_count", // 발행 주식 수(PER·PBR 계산용)
   ];
-  const SOURCE_KINDS = ["datagokr", "twelvedata", "manual", "csv"];
+  const SOURCE_KINDS = ["datagokr", "twelvedata", "alphavantage", "manual", "csv"];
   const isNum = (v) => typeof v === "number" && Number.isFinite(v);
 
   /** 한 묶음을 표준 형태로 맞춘다. 숫자가 아닌 금액 필드는 뺀다. 연도가 없으면 null. */
@@ -163,6 +163,74 @@
       }
     }
     return { summaries, valuation };
+  }
+
+  // ----- 미국: Alpha Vantage (무료 키, 하루 25회) — OVERVIEW(개요·지표), INCOME_STATEMENT, BALANCE_SHEET -----
+  /** Alpha Vantage 값(문자열, 없으면 "None"·"-")을 숫자로. 없으면 undefined. */
+  function avNum(v) {
+    if (v === undefined || v === null) return undefined;
+    const t = String(v).trim();
+    if (t === "" || t === "None" || t === "-" || t === "null") return undefined;
+    const n = Number(t.replace(/,/g, ""));
+    return Number.isFinite(n) ? n : undefined;
+  }
+
+  /**
+   * Alpha Vantage 응답(overview, income_statement, balance_sheet)을 연도 묶음·가치 지표 스냅샷·자동 소개로 바꾼다.
+   * 없는 응답은 null 로 넘기면 건너뛴다. 연도는 결산일(fiscalDateEnding)의 해.
+   */
+  function parseAlphaVantage(overview, income, balance, nowIso) {
+    const byDate = new Map();
+    const put = (date, fields) => {
+      if (!date) return;
+      byDate.set(date, { ...(byDate.get(date) || { fiscal_date: date }), ...fields });
+    };
+    const list = (res) => (res && Array.isArray(res.annualReports) ? res.annualReports : []);
+    let currency = "USD";
+    for (const e of list(income)) {
+      if (e.reportedCurrency) currency = e.reportedCurrency;
+      put(e.fiscalDateEnding, { sales_amount: avNum(e.totalRevenue), operating_profit_amount: avNum(e.operatingIncome), net_income_amount: avNum(e.netIncome) });
+    }
+    for (const e of list(balance)) {
+      put(e.fiscalDateEnding, { total_assets_amount: avNum(e.totalAssets), total_liabilities_amount: avNum(e.totalLiabilities), total_equity_amount: avNum(e.totalShareholderEquity) });
+    }
+    const summaries = [...byDate.values()]
+      .map((v) => normalizeSummary({ ...v, fiscal_year: Number(String(v.fiscal_date).slice(0, 4)), currency_kind: currency, statement_kind: "annual", source_kind: "alphavantage", collected_at: nowIso }))
+      .filter((s) => s && AMOUNT_FIELDS.some((f) => s[f] !== undefined))
+      .sort((a, b) => b.fiscal_year - a.fiscal_year)
+      .slice(0, 8) // 응답에 20년치가 있어도 최근 8년만 쓴다
+      .sort((a, b) => a.fiscal_year - b.fiscal_year);
+
+    let valuation = null;
+    let profile = null;
+    const ov = overview && typeof overview === "object" && (overview.Symbol || overview.Name) ? overview : null;
+    if (ov) {
+      const shares = avNum(ov.SharesOutstanding);
+      valuation = {
+        asof_date: (nowIso || "").slice(0, 10),
+        per_ratio: avNum(ov.PERatio) ?? null,
+        pbr_ratio: avNum(ov.PriceToBookRatio) ?? null,
+        roe_rate: avNum(ov.ReturnOnEquityTTM) ?? null,
+        operating_margin_rate: avNum(ov.OperatingMarginTTM) ?? null,
+        market_cap_amount: avNum(ov.MarketCapitalization) ?? null,
+        shares_count: shares ?? null,
+        dividend_yield_rate: avNum(ov.DividendYield) ?? null,
+        source_kind: "alphavantage",
+      };
+      if (shares && summaries.length) {
+        const latest = summaries.reduce((a, b) => (b.fiscal_year > a.fiscal_year ? b : a));
+        if (!isNum(latest.shares_count)) latest.shares_count = shares;
+      }
+      const industry = [ov.Sector, ov.Industry].map((x) => clean(x, 80)).filter((x) => x && x !== "None");
+      const summary = clean(ov.Description, 2000);
+      if (industry.length || (summary && summary !== "None")) {
+        profile = { source_kind: "alphavantage", collected_at: nowIso, summary_lang: "en" };
+        if (industry.length) profile.industry_name = industry.join(" / ");
+        if (summary && summary !== "None") profile.business_summary = summary;
+        if (ov.OfficialSite && ov.OfficialSite !== "None") profile.website_url = clean(ov.OfficialSite, 200);
+      }
+    }
+    return { summaries, valuation, profile };
   }
 
   // ----- 국내: 공공데이터포털 금융위원회 기업기본정보·기업재무정보 -----
@@ -504,6 +572,8 @@
     deriveMetrics,
     computeValuation,
     parseTwelveData,
+    avNum,
+    parseAlphaVantage,
     parseDataGoKrSummary,
     normalizeCorpName,
     commonStockName,

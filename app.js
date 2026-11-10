@@ -1958,6 +1958,14 @@ function loadFundamentals() {
 function saveFundamentals(map) {
   localStorage.setItem(FUNDAMENTALS_KEY, JSON.stringify(map));
 }
+const FUND_API_KEY_KEY = "stockFundApiKey_v1"; // us_fund_api_key: Alpha Vantage 무료 키(미국 재무용, 선택)
+function loadFundApiKey() {
+  return localStorage.getItem(FUND_API_KEY_KEY) || "";
+}
+function saveFundApiKey(key) {
+  localStorage.setItem(FUND_API_KEY_KEY, key);
+}
+let AV_GAP_MS = 13000; // Alpha Vantage 무료 키는 분당 5회라 호출 사이를 넓힌다(시험에서는 0으로 줄인다)
 const SHARES_KEY = "stockListedShares_v2"; // listed_shares_map: holding_key -> {shares_count, asof_date} (국내 시세 응답의 상장 주식 수)
 const CORP_IDS_KEY = "stockCorpIds_v2"; // corp_id_map: holding_key -> {crno, corp_name} (국내 법인등록번호, 기업재무정보 조회용)
 function loadListedShares() {
@@ -2077,7 +2085,7 @@ function fundamentalsSectionHtml(r, ctx) {
     </div>
     <div class="hd-note">${latest.fiscal_year}년 결산 기준, 현재가×주식 수로 계산한 값${val.per_ratio === null && val.pbr_ratio === null ? " (주식 수가 없으면 PER·PBR은 계산되지 않습니다. 국내는 '전체 시세 새로고침' 뒤 자동으로 채워지고, 직접 입력에 주식 수를 넣을 수도 있습니다)" : ""}</div>`;
     const snapLine = lastSnap
-      ? `<div class="hd-note">공시 통계(${escapeHtml(lastSnap.source_kind === "twelvedata" ? "Twelve Data" : lastSnap.source_kind)}, ${lastSnap.asof_date}): PER ${fmtX(lastSnap.per_ratio)} · PBR ${fmtX(lastSnap.pbr_ratio)} · ROE ${fmtRate(lastSnap.roe_rate)}${lastSnap.dividend_yield_rate ? ` · 배당수익률 ${fmtRate(lastSnap.dividend_yield_rate)}` : ""}</div>`
+      ? `<div class="hd-note">공시 통계(${escapeHtml({ twelvedata: "Twelve Data", alphavantage: "Alpha Vantage" }[lastSnap.source_kind] || lastSnap.source_kind)}, ${lastSnap.asof_date}): PER ${fmtX(lastSnap.per_ratio)} · PBR ${fmtX(lastSnap.pbr_ratio)} · ROE ${fmtRate(lastSnap.roe_rate)}${lastSnap.dividend_yield_rate ? ` · 배당수익률 ${fmtRate(lastSnap.dividend_yield_rate)}` : ""}</div>`
       : "";
     const histLine =
       snaps.length > 1
@@ -2094,7 +2102,7 @@ function fundamentalsSectionHtml(r, ctx) {
     body = `${fundHealthHtml(r, ctx)}<div class="fund-tiles">${tiles}</div>${valueLine}${snapLine}${histLine}${corpNote}
       <div class="fund-table-wrap"><table class="fund-table"><thead><tr><th>연도</th><th>매출</th><th>영업이익</th><th>순이익</th><th>자산</th><th>부채</th><th>자본</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
       ${fundBarsHtml(list.slice(-6))}
-      <div class="hd-note">출처: ${list.map((s) => s.fiscal_year + " " + ({ twelvedata: "Twelve Data", datagokr: "공공데이터포털", manual: "직접 입력", csv: "CSV" }[s.source_kind] || s.source_kind)).slice(-6).join(", ")}</div>`;
+      <div class="hd-note">출처: ${list.map((s) => s.fiscal_year + " " + ({ twelvedata: "Twelve Data", alphavantage: "Alpha Vantage", datagokr: "공공데이터포털", manual: "직접 입력", csv: "CSV" }[s.source_kind] || s.source_kind)).slice(-6).join(", ")}</div>`;
   }
 
   const units = FUND_UNITS[market].map(([label, mult], i) => `<option value="${mult}" ${i === 0 ? "selected" : ""}>${label}</option>`).join("");
@@ -2232,8 +2240,78 @@ function fetchFundamentalsOne(marketKind, stockName) {
   return marketKind === "kr" ? fetchFundamentalsKR(stockName) : fetchFundamentalsUS(stockName);
 }
 
-// 한 미국 종목의 손익·재무상태·통계를 받아 저장한다. 하나라도 받으면 성공이고, 못 받은 것은 사유를 모아 돌려준다.
-async function fetchFundamentalsUS(stockName) {
+// ----- 미국: Alpha Vantage (무료 키, 하루 25회). Twelve Data 무료 플랜은 재무 항목을 주지 않는다 -----
+async function fetchAlphaVantageJson(fn, symbol, apiKey) {
+  const params = new URLSearchParams({ function: fn, symbol, apikey: apiKey });
+  const res = await fetch(`https://www.alphavantage.co/query?${params.toString()}`);
+  const data = await res.json();
+  if (data["Error Message"]) throw new Error("종목을 찾지 못했습니다(시세 코드(티커)를 확인하세요)");
+  const note = String(data.Note || data.Information || "");
+  if (note) {
+    const e = new Error();
+    // 하루 한도 안내 문구에도 'premium'이 들어 있어서 하루 한도를 먼저 본다
+    if (/per day|daily|25 requests/i.test(note)) {
+      e.message = "Alpha Vantage 하루 한도(25회)에 도달했습니다. 내일 다시 받으세요";
+      e.daily_limit = true;
+    } else if (/premium/i.test(note)) {
+      e.message = "Alpha Vantage 무료 키로는 제공되지 않는 항목입니다";
+    } else {
+      e.message = "Alpha Vantage 분당 한도에 걸렸습니다";
+      e.rate_limited = true;
+    }
+    throw e;
+  }
+  return data;
+}
+
+async function fetchFundamentalsAlpha(stockName) {
+  const key = holdingKey("us", stockName);
+  if (/ETF|ETN/i.test(stockName)) return { ok: false, message: "ETF·펀드는 기업 재무제표가 없어 받지 않습니다" };
+  const symbol = loadSymbols()[key];
+  if (!symbol) return { ok: false, message: "시세 코드가 없습니다" };
+  const apiKey = loadFundApiKey();
+  const got = {};
+  const problems = [];
+  for (const [i, [name, fn]] of [["overview", "OVERVIEW"], ["income", "INCOME_STATEMENT"], ["balance", "BALANCE_SHEET"]].entries()) {
+    if (i > 0) await sleep(AV_GAP_MS);
+    const run = () => fetchAlphaVantageJson(fn, symbol, apiKey);
+    try {
+      try {
+        got[name] = await run();
+      } catch (e) {
+        if (!e.rate_limited) throw e;
+        await waitWithCountdown(RATE_LIMIT_WAIT_MS, (sec) => `분당 한도에 걸려 ${sec}초 기다린 뒤 ${stockName} ${fn}을 다시 조회합니다`);
+        got[name] = await run();
+      }
+    } catch (e) {
+      if (e.daily_limit) return { ok: false, message: e.message, daily_limit: true };
+      problems.push(`${fn}: ${e.message}`);
+    }
+  }
+  const parsed = Fundamentals.parseAlphaVantage(got.overview || null, got.income || null, got.balance || null, new Date().toISOString());
+  const profileSaved = saveAutoProfile(key, parsed.profile);
+  if (parsed.summaries.length === 0 && !parsed.valuation && !profileSaved) {
+    return { ok: false, message: problems[0] || "받은 정보가 없습니다(ETF·펀드이거나 티커가 다를 수 있습니다). 직접 입력·CSV로 넣을 수 있습니다" };
+  }
+  let map = loadFundamentals();
+  let added = 0;
+  parsed.summaries.forEach((s) => {
+    const r = Fundamentals.upsertYear(map, key, s);
+    map = r.map;
+    if (r.added) added++;
+  });
+  saveFundamentals(map);
+  if (parsed.valuation) saveValuations(Fundamentals.appendValuation(loadValuations(), key, parsed.valuation));
+  return { ok: true, years: parsed.summaries.length, added, problems, profile: profileSaved };
+}
+
+// 미국: Alpha Vantage 키가 있으면 그것으로, 없으면 Twelve Data(무료 플랜은 재무를 주지 않음)로 시도한다.
+function fetchFundamentalsUS(stockName) {
+  return loadFundApiKey() ? fetchFundamentalsAlpha(stockName) : fetchFundamentalsTwelve(stockName);
+}
+
+// 한 미국 종목의 손익·재무상태·통계를 Twelve Data 에서 받아 저장한다. 하나라도 받으면 성공이고, 못 받은 것은 사유를 모아 돌려준다.
+async function fetchFundamentalsTwelve(stockName) {
   const key = holdingKey("us", stockName);
   const symbol = loadSymbols()[key];
   if (!symbol) return { ok: false, message: "시세 코드가 없습니다" };
@@ -2259,8 +2337,10 @@ async function fetchFundamentalsUS(stockName) {
   const parsed = Fundamentals.parseTwelveData(got.income || null, got.balance || null, got.stats || null, new Date().toISOString());
   const profileSaved = saveAutoProfile(key, got.profile ? Fundamentals.parseTwelveProfile(got.profile, new Date().toISOString()) : null);
   if (parsed.summaries.length === 0 && !parsed.valuation && !profileSaved) {
-    const plan = problems.some((p) => /plan|upgrade|grow|pro|available|subscription|403/i.test(p)) ? " (무료 플랜에서는 제공되지 않는 항목일 수 있습니다. 직접 입력·CSV로 넣을 수 있습니다)" : "";
-    return { ok: false, message: (problems[0] || "받은 정보가 없습니다") + plan };
+    if (problems.some((p) => /exclusively|plan|upgrade|subscription/i.test(p))) {
+      return { ok: false, message: "Twelve Data 무료 플랜은 재무·기업 정보를 제공하지 않습니다. 보유 화면의 '기업 정보 관리'에 Alpha Vantage 무료 키를 넣으면 미국 재무를 받을 수 있습니다(직접 입력·CSV도 가능)" };
+    }
+    return { ok: false, message: problems[0] || "받은 정보가 없습니다" };
   }
   let map = loadFundamentals();
   let added = 0;
@@ -2288,14 +2368,20 @@ async function fetchFundamentalsAll() {
     .sort((a, b) => (a.market_kind === b.market_kind ? 0 : a.market_kind === "kr" ? -1 : 1));
   const failed = [];
   let filled = 0;
+  let stopped = false;
   for (let i = 0; i < targets.length; i++) {
     setFundManageStatus(`기업 정보 받는 중... (${i + 1}/${targets.length}) ${targets[i].stock_name}`);
     const result = await fetchFundamentalsOne(targets[i].market_kind, targets[i].stock_name);
     if (result.ok) filled++;
     else failed.push(`${targets[i].stock_name}: ${result.message}`);
-    if (i < targets.length - 1) await sleep(REFRESH_GAP_MS[targets[i].market_kind] ?? 0);
+    if (result.daily_limit) {
+      stopped = true; // 하루 한도에 닿으면 남은 종목은 내일 이어서 받는다
+      break;
+    }
+    const gap = targets[i].market_kind === "us" && loadFundApiKey() ? AV_GAP_MS : REFRESH_GAP_MS[targets[i].market_kind] ?? 0;
+    if (i < targets.length - 1) await sleep(gap);
   }
-  return { target_cnt: targets.length, filled, failed };
+  return { target_cnt: targets.length, filled, failed, stopped };
 }
 
 function setFundManageStatus(text) {
@@ -2339,6 +2425,9 @@ async function handleFundamentalsCsvImportFile(file) {
 }
 
 function setupFundamentals() {
+  const avInput = document.getElementById("fund-api-key-input");
+  avInput.value = loadFundApiKey();
+  avInput.addEventListener("change", () => saveFundApiKey(avInput.value.trim()));
   const area = document.getElementById("holdings-area");
   const statusOf = (key) => [...document.querySelectorAll(".fund-status")].find((e) => e.dataset.key === key);
 
@@ -2439,7 +2528,7 @@ function setupFundamentals() {
       setFundManageStatus(
         r.target_cnt === 0
           ? "받을 종목이 없습니다 (시세 코드가 없거나 최근 30일 안에 받은 종목은 건너뜁니다)."
-          : `기업 정보 ${r.filled}종목 받음` + (r.failed.length > 0 ? ` · 실패 ${r.failed.length}개 (${shown})` : "")
+          : `기업 정보 ${r.filled}종목 받음` + (r.failed.length > 0 ? ` · 실패 ${r.failed.length}개 (${shown})` : "") + (r.stopped ? " · Alpha Vantage 하루 한도로 중단했습니다. 남은 종목은 내일 다시 누르면 이어서 받습니다(받은 종목은 건너뜀)" : "")
       );
     } finally {
       fundamentalsRunning = false;
@@ -2484,7 +2573,7 @@ function saveAutoProfile(key, fields) {
   return true;
 }
 
-const PROFILE_SOURCE_LABEL = { twelvedata: "Twelve Data", datagokr: "공공데이터포털" };
+const PROFILE_SOURCE_LABEL = { twelvedata: "Twelve Data", alphavantage: "Alpha Vantage", datagokr: "공공데이터포털" };
 
 // 종목 상세 '기업 브리핑' 위쪽의 '이 기업은?' 상자: 업종, 하는 일, 주요 제품·서비스, 주요 매출원.
 function profileSectionHtml(r, ctx) {
@@ -4494,6 +4583,7 @@ function collectBackupData() {
     fund_event_map: loadFundEvents(),
     fund_signal_settings: loadFundSignalSettings(),
     us_price_api_key: loadApiKey(),
+    us_fund_api_key: loadFundApiKey(),
     kr_price_api_key: loadKrApiKey(),
   };
 }
@@ -4541,6 +4631,9 @@ async function handleJsonImportFile(file) {
   if (data.fund_signal_settings && typeof data.fund_signal_settings === "object") saveFundSignalSettings(data.fund_signal_settings);
   if (typeof data.us_price_api_key === "string") saveApiKey(data.us_price_api_key);
   if (typeof data.kr_price_api_key === "string") saveKrApiKey(data.kr_price_api_key);
+  if (typeof data.us_fund_api_key === "string") saveFundApiKey(data.us_fund_api_key);
+  const fundKeyInput = document.getElementById("fund-api-key-input");
+  if (fundKeyInput) fundKeyInput.value = loadFundApiKey();
 
   document.getElementById("api-key-input").value = loadApiKey();
   document.getElementById("kr-api-key-input").value = loadKrApiKey();

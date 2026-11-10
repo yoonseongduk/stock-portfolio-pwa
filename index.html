@@ -65,6 +65,10 @@
         <details class="help" id="fund-manage">
           <summary>기업 정보 관리 (재무 수집·CSV)</summary>
           <p class="hint-text">종목 상세의 '기업 브리핑'에 쓰는 연도별 재무(매출·영업이익·순이익·자산·부채·자본)를 모읍니다. 국내는 공공데이터포털(금융위원회 기업재무정보·기업기본정보, 설정의 공공데이터포털 키 사용), 미국은 Twelve Data(플랜에 따라 안 될 수 있음)에서 받고, 그 밖의 값은 직접 입력이나 CSV로 넣습니다. 앱이 자동으로 받지는 않고 버튼을 누를 때만 받습니다. CSV 가져오기·내보내기는 더보기 &gt; 데이터 관리에 있습니다. CSV 머리글: 구분(국내/미국), 종목명, 연도, 매출액, 영업이익, 순이익, 자산총계, 부채총계, 자본총계, 발행주식수 (금액은 원·달러 단위 그대로, 내보낸 파일을 그대로 고쳐 가져오면 됩니다).</p>
+          <label class="fund-key-label">Alpha Vantage 무료 키 (미국 재무용, 선택)
+            <input type="password" id="fund-api-key-input" placeholder="alphavantage.co 에서 이메일로 바로 발급" autocomplete="off" />
+          </label>
+          <p class="hint-text">Twelve Data 무료 플랜은 재무 항목을 주지 않아서, 미국 종목의 손익·재무상태·기업 소개는 이 키로 받습니다. 하루 25회(종목당 3회)라 미국 종목이 많으면 며칠에 나눠 받습니다. 키는 폰 안에만 저장됩니다.</p>
           <div class="button-row">
             <button type="button" id="fund-fetch-all-btn" class="secondary-btn">기업 정보 일괄 받기 (국내·미국)</button>
           </div>
