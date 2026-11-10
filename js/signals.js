@@ -113,6 +113,31 @@
     return { peak_close: peak, atr, stop_line: peak - atrMultiple * atr };
   }
 
+  /**
+   * 날짜별 추적 손절선(그래프용). 각 날짜의 선 = 그날까지 최근 lookback 거래일 최고 종가 - 배수 × 그날의 ATR.
+   * ATR 을 구할 수 없는 앞부분은 건너뛴다. 마지막 값은 trailingStop() 의 stop_line 과 같다.
+   * @returns {{price_date:string, stop_line:number}[]}
+   */
+  function trailingStopSeries(history, lookback, atrMultiple, atrPeriod) {
+    const rows = cleanRows(history);
+    const n = Math.max(2, Math.round(atrPeriod || AlertRules.ALERT_DEFAULTS.atr_period));
+    const tr = rows.map((e, i) => {
+      if (i === 0) return null;
+      const prev = rows[i - 1].close_price;
+      const hasRange = isNum(e.high_price) && isNum(e.low_price) && e.high_price > 0 && e.low_price > 0 && e.high_price >= e.low_price;
+      return hasRange ? Math.max(e.high_price - e.low_price, Math.abs(e.high_price - prev), Math.abs(e.low_price - prev)) : Math.abs(e.close_price - prev);
+    });
+    const out = [];
+    for (let i = n; i < rows.length; i++) {
+      let sum = 0;
+      for (let j = i - n + 1; j <= i; j++) sum += tr[j];
+      let peak = 0;
+      for (let j = Math.max(0, i - lookback + 1); j <= i; j++) peak = Math.max(peak, rows[j].close_price);
+      out.push({ price_date: rows[i].price_date, stop_line: peak - atrMultiple * (sum / n) });
+    }
+    return out;
+  }
+
   /** 최근 250거래일 종가 범위에서 현재 위치와 고점 대비 하락률(0~1 소수, 하락은 음수). */
   function rangePosition(rows, days) {
     const recent = rows.slice(-(days || 250));
@@ -239,6 +264,7 @@
     rsi,
     findCross,
     trailingStop,
+    trailingStopSeries,
     rangePosition,
     computeSignal,
     evaluateSignals,

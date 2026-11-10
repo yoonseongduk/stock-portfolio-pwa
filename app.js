@@ -1088,7 +1088,7 @@ function sectorOptionsHtml(choices, current) {
 }
 
 // 가격 추이 차트(SVG). 종가 선 + 내 평균단가 점선. 기록이 2일 미만이면 안내만 돌려준다.
-function priceChartHtml(entries, averagePrice, marketKind) {
+function priceChartHtml(entries, averagePrice, marketKind, trail = []) {
   const rows = [...entries].filter((e) => Number.isFinite(e.close_price)).sort((a, b) => (a.price_date < b.price_date ? -1 : 1)).slice(-250);
   if (rows.length < 2) {
     return `<div class="hd-note">저장된 시세가 ${rows.length}일뿐입니다. '과거 시세 채우기'를 눌러 주세요.</div>`;
@@ -1100,7 +1100,12 @@ function priceChartHtml(entries, averagePrice, marketKind) {
   const t = (e) => new Date(e.price_date + "T00:00:00").getTime();
   const t0 = t(rows[0]);
   const t1 = t(rows[rows.length - 1]);
-  const values = rows.map((e) => e.close_price).concat(averagePrice > 0 ? [averagePrice] : []);
+  const firstDate = rows[0].price_date;
+  const trailRows = trail.filter((p) => p.price_date >= firstDate && Number.isFinite(p.stop_line) && p.stop_line > 0); // 추세 이탈선(그래프에 같이 그림)
+  const values = rows
+    .map((e) => e.close_price)
+    .concat(averagePrice > 0 ? [averagePrice] : [])
+    .concat(trailRows.map((p) => p.stop_line));
   const lo = Math.min(...values);
   const hi = Math.max(...values);
   const span = hi - lo || 1;
@@ -1111,6 +1116,15 @@ function priceChartHtml(entries, averagePrice, marketKind) {
   const last = rows[rows.length - 1].close_price;
   const change = first === 0 ? 0 : (last - first) / first;
   const color = change >= 0 ? "#e66767" : "#3987e5"; // 한국 관행: 상승 빨강, 하락 파랑
+  const trailPath = trailRows
+    .map((p, i) => `${i === 0 ? "M" : "L"}${x(p).toFixed(1)},${y(p.stop_line).toFixed(1)}`)
+    .join(" ");
+  const lastTrail = trailRows.length ? trailRows[trailRows.length - 1] : null;
+  const broken = lastTrail && last < lastTrail.stop_line; // 현재가가 추세 이탈선 아래
+  const trailSvg = trailPath
+    ? `<path class="pc-trail" d="${trailPath}" fill="none" stroke="#fb923c" stroke-width="1.2" stroke-dasharray="1.5 2" />` +
+      (broken ? `<circle class="pc-trail-break" cx="${x(rows[rows.length - 1]).toFixed(1)}" cy="${y(last).toFixed(1)}" r="3" fill="#fb923c" />` : "")
+    : "";
   const avgLine =
     averagePrice > 0
       ? `<line class="pc-avg" x1="${PADX}" x2="${W - PADX}" y1="${y(averagePrice).toFixed(1)}" y2="${y(averagePrice).toFixed(1)}" stroke="#facc15" stroke-width="1" stroke-dasharray="4 3" />`
@@ -1118,6 +1132,7 @@ function priceChartHtml(entries, averagePrice, marketKind) {
   return `
     <svg class="price-chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="종가 추이">
       ${avgLine}
+      ${trailSvg}
       <path class="pc-line" d="${path}" fill="none" stroke="${color}" stroke-width="1.6" />
     </svg>
     <div class="pc-legend">
@@ -1125,7 +1140,8 @@ function priceChartHtml(entries, averagePrice, marketKind) {
       <span>최저 ${formatMoney(Math.min(...rows.map((e) => e.close_price)), marketKind)}</span>
       <span>${rows[0].price_date} ~ ${rows[rows.length - 1].price_date} (${rows.length}일)</span>
       <span class="${profitClass(change)}">기간 시세 변화 ${formatPercent(change)}</span>
-      ${averagePrice > 0 ? '<span class="pc-avg-note">점선: 내 평균단가</span>' : ""}
+      ${averagePrice > 0 ? '<span class="pc-avg-note">노란 점선: 내 평균단가</span>' : ""}
+      ${trailPath ? `<span class="pc-trail-note">주황 점선: 추세 이탈선 ${glossaryBtn("trend_break")} (그날까지 최근 고점 − ATR×배수)${broken ? " · 현재가가 선 아래 ●" : ""}</span>` : ""}
     </div>`;
 }
 
@@ -1237,7 +1253,7 @@ function holdingRowHtml(r, ctx) {
           <div class="hd-title">가격 추이 <span class="hd-note">(저장된 시세 ${(ctx.historyByKey[r.key] || []).length}일)</span>
             <button type="button" class="fetch-btn" data-action="backfill-one" data-key="${key}">과거 시세 채우기</button>
           </div>
-          ${priceChartHtml(ctx.historyByKey[r.key] || [], r.h.average_price, market)}
+          ${priceChartHtml(ctx.historyByKey[r.key] || [], r.h.average_price, market, Signals.trailingStopSeries(ctx.historyByKey[r.key] || [], ctx.signalSettings.trail_lookback_days, ctx.signalSettings.trail_atr_multiple, ctx.atrPeriod))}
         </div>
         <div class="hd-section">
           <div class="hd-title">배당 ${div.count}건${div.count > 0 ? ` · 합계 ${formatMoney(div.total, market)}` : ""}</div>
@@ -1302,7 +1318,7 @@ function renderHoldings(holdings, prices, symbols, info = {}, transactions = [],
   const sectorChoices = [...new Set([...DEFAULT_SECTORS, ...allRows.map((r) => r.sector_name).filter(Boolean)])].sort((a, b) =>
     a.localeCompare(b, "ko")
   );
-  const ctx = { marketTotals, tradesByKey, dividendByKey, sectorChoices, historyByKey: historyMap, alertRules: loadAlertRules(), weightOver: computeWeightOver(allRows) };
+  const ctx = { marketTotals, tradesByKey, dividendByKey, sectorChoices, historyByKey: historyMap, signalSettings, atrPeriod, alertRules: loadAlertRules(), weightOver: computeWeightOver(allRows) };
 
   const groups = groupHoldingRows(rows, holdingsView);
   const sectorOptions = [...new Set(allRows.map((r) => r.sector_name).filter(Boolean))]
