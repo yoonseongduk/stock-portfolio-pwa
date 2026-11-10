@@ -1204,6 +1204,44 @@ function priceChartHtml(entries, averagePrice, marketKind, trail = [], maLines =
     ${maToggleHtml}`;
 }
 
+// RSI 그래프: 세로는 항상 0~100(30 이하 과매도, 70 이상 과열 구간을 색으로 표시). 가로는 위쪽 가격 그래프와 같은 날짜 범위.
+function rsiChartHtml(entries, rsiSeriesList, settings) {
+  const rows = [...entries].filter((e) => Number.isFinite(e.close_price)).sort((a, b) => (a.price_date < b.price_date ? -1 : 1)).slice(-250);
+  if (rows.length < 2) return "";
+  const firstDate = rows[0].price_date;
+  const pts = rsiSeriesList.filter((p) => p.price_date >= firstDate);
+  if (pts.length < 2) return '<div class="hd-note">RSI 그래프는 시세가 더 쌓이면 보입니다.</div>';
+  const W = 300;
+  const H = 74;
+  const PADX = 4;
+  const PADY = 6;
+  const t = (d) => new Date(d + "T00:00:00").getTime();
+  const t0 = t(rows[0].price_date);
+  const t1 = t(rows[rows.length - 1].price_date);
+  const x = (d) => PADX + ((t(d) - t0) / (t1 - t0 || 1)) * (W - 2 * PADX);
+  const y = (v) => PADY + (1 - v / 100) * (H - 2 * PADY);
+  const path = pts.map((p, i) => `${i === 0 ? "M" : "L"}${x(p.price_date).toFixed(1)},${y(p.value).toFixed(1)}`).join(" ");
+  const buy = settings.rsi_buy_level;
+  const sell = settings.rsi_sell_level;
+  const last = pts[pts.length - 1].value;
+  const zone = last <= buy ? "과매도 구간" : last >= sell ? "과열 구간" : "중간 구간";
+  return `
+    <svg class="rsi-chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="RSI 추이">
+      <rect class="rsi-zone-hot" x="${PADX}" y="${y(100).toFixed(1)}" width="${W - 2 * PADX}" height="${(y(sell) - y(100)).toFixed(1)}" fill="rgba(230,103,103,0.14)" />
+      <rect class="rsi-zone-cold" x="${PADX}" y="${y(buy).toFixed(1)}" width="${W - 2 * PADX}" height="${(y(0) - y(buy)).toFixed(1)}" fill="rgba(57,135,229,0.14)" />
+      <line class="rsi-guide" x1="${PADX}" x2="${W - PADX}" y1="${y(sell).toFixed(1)}" y2="${y(sell).toFixed(1)}" stroke="#94a3b8" stroke-width="0.8" stroke-dasharray="3 3" />
+      <line class="rsi-guide" x1="${PADX}" x2="${W - PADX}" y1="${y(buy).toFixed(1)}" y2="${y(buy).toFixed(1)}" stroke="#94a3b8" stroke-width="0.8" stroke-dasharray="3 3" />
+      <path class="rsi-line" d="${path}" fill="none" stroke="#22d3ee" stroke-width="1.3" />
+      <circle cx="${x(pts[pts.length - 1].price_date).toFixed(1)}" cy="${y(last).toFixed(1)}" r="2.5" fill="#22d3ee" />
+      <text x="${W - PADX}" y="${(y(sell) - 2).toFixed(1)}" text-anchor="end" font-size="7" fill="#94a3b8">${sell}</text>
+      <text x="${W - PADX}" y="${(y(buy) + 8).toFixed(1)}" text-anchor="end" font-size="7" fill="#94a3b8">${buy}</text>
+    </svg>
+    <div class="pc-legend">
+      <span class="rsi-note">RSI(${settings.rsi_period}) ${glossaryBtn("rsi")} 지금 ${last.toFixed(1)} · ${zone}</span>
+      <span>세로 0~100 고정 · 위 ${sell} 이상 과열(빨강 영역), 아래 ${buy} 이하 과매도(파랑 영역)</span>
+    </div>`;
+}
+
 // 종목 한 줄에 넣는 시세 미니 그래프(최근 60일 종가 선)와 전일비. 시세가 2일 미만이면 둘 다 비어 있다.
 function summaryTrend(entries) {
   const rows = [...entries].filter((e) => Number.isFinite(e.close_price)).sort((a, b) => (a.price_date < b.price_date ? -1 : 1));
@@ -1313,6 +1351,7 @@ function holdingRowHtml(r, ctx) {
             <button type="button" class="fetch-btn" data-action="backfill-one" data-key="${key}">과거 시세 채우기</button>
           </div>
           ${priceChartHtml(ctx.historyByKey[r.key] || [], r.h.average_price, market, Signals.trailingStopSeries(ctx.historyByKey[r.key] || [], ctx.signalSettings.trail_lookback_days, ctx.signalSettings.trail_atr_multiple, ctx.atrPeriod), chartMaSpecs().filter((m) => chartLayersOn.has(m.period)).map((m) => ({ ...m, points: Signals.smaSeries(ctx.historyByKey[r.key] || [], m.period) })), maToggleHtml())}
+          ${rsiChartHtml(ctx.historyByKey[r.key] || [], Signals.rsiSeries(ctx.historyByKey[r.key] || [], ctx.signalSettings.rsi_period), ctx.signalSettings)}
         </div>
         <div class="hd-section">
           <div class="hd-title">배당 ${div.count}건${div.count > 0 ? ` · 합계 ${formatMoney(div.total, market)}` : ""}</div>
@@ -3667,6 +3706,38 @@ function setupNavigation() {
 
 // 앱 버전과 오프라인 저장본(서비스 워커 캐시)의 버전을 화면에 보여 준다.
 // 둘이 다르면 옛 저장본이 남아 있다는 뜻이라 앱을 닫았다가 다시 열라고 안내한다.
+// 새 버전 확인: 서버의 version.js 를 새로 받아 지금 버전과 비교하고, 다르면 앱을 다시 불러온다.
+// reloadApp 은 시험에서 바꿔 끼울 수 있게 변수로 둔다.
+let reloadApp = () => window.location.reload();
+function setUpdateStatus(text) {
+  document.querySelectorAll(".update-status").forEach((el) => (el.textContent = text));
+}
+async function checkForUpdate() {
+  setUpdateStatus("새 버전을 확인하는 중...");
+  try {
+    const res = await fetch("./version.js", { cache: "no-store" });
+    if (!res.ok) throw new Error(`응답 ${res.status}`);
+    const found = (await res.text()).match(/APP_VERSION\s*=\s*"([^"]+)"/);
+    if (!found) throw new Error("버전 정보를 읽지 못했습니다");
+    const latest = found[1];
+    if ("serviceWorker" in navigator) {
+      // 서비스 워커 갱신은 기다리지 않는다(응답이 늦거나 없을 수 있음). 화면은 아래에서 바로 다시 불러온다.
+      navigator.serviceWorker.getRegistration().then((reg) => reg && reg.update()).catch(() => {});
+    }
+    if (latest === APP_VERSION) {
+      setUpdateStatus(`이미 최신 버전입니다 (${APP_VERSION})`);
+      return;
+    }
+    setUpdateStatus(`새 버전 ${latest}이(가) 있습니다. 새로 불러옵니다...`);
+    setTimeout(() => reloadApp(), 800);
+  } catch (e) {
+    setUpdateStatus(`확인하지 못했습니다: ${e.message} (인터넷 연결을 확인해 주세요)`);
+  }
+}
+document.addEventListener("click", (event) => {
+  if (event.target.closest('[data-action="check-update"]')) checkForUpdate();
+});
+
 async function renderVersionInfo() {
   document.querySelectorAll(".app-version-text").forEach((el) => {
     el.textContent = `앱 버전 ${APP_VERSION} (${APP_BUILD_DATE})`;

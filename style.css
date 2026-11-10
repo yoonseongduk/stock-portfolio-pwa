@@ -1175,3 +1175,6 @@ details.help summary {
 .hv-active { color: #fcd34d; }
 .signal-rebound_watch { background: #0e7490; }
 .sig-rebound { color: #67e8f9; }
+.rsi-chart { width: 100%; height: auto; display: block; margin-top: 8px; background: #0b1220; border-radius: 6px; }
+.rsi-note { color: #22d3ee; }
+.update-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }

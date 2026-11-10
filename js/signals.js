@@ -86,6 +86,35 @@
   }
 
   /**
+   * 날짜별 RSI(Wilder 방식, 그래프용). period+1일째부터 시작한다. 마지막 값은 rsi() 와 같다.
+   * @returns {{price_date:string, value:number}[]}
+   */
+  function rsiSeries(history, period) {
+    const rows = cleanRows(history);
+    const n = period || SIGNAL_DEFAULTS.rsi_period;
+    if (rows.length < n + 1) return [];
+    const closes = rows.map((e) => e.close_price);
+    let gain = 0;
+    let loss = 0;
+    for (let i = 1; i <= n; i++) {
+      const d = closes[i] - closes[i - 1];
+      if (d >= 0) gain += d;
+      else loss -= d;
+    }
+    let avgGain = gain / n;
+    let avgLoss = loss / n;
+    const toRsi = () => (avgLoss === 0 ? (avgGain === 0 ? 50 : 100) : 100 - 100 / (1 + avgGain / avgLoss));
+    const out = [{ price_date: rows[n].price_date, value: toRsi() }];
+    for (let i = n + 1; i < closes.length; i++) {
+      const d = closes[i] - closes[i - 1];
+      avgGain = (avgGain * (n - 1) + (d > 0 ? d : 0)) / n;
+      avgLoss = (avgLoss * (n - 1) + (d < 0 ? -d : 0)) / n;
+      out.push({ price_date: rows[i].price_date, value: toRsi() });
+    }
+    return out;
+  }
+
+  /**
    * 최근 lookback 거래일 안의 단기·장기 이동평균 교차를 찾는다. 가장 최근 교차 하나를 돌려준다.
    * @returns {{kind:'golden'|'dead', days_ago:number}|null}
    */
@@ -315,6 +344,7 @@
     cleanRows,
     sma,
     rsi,
+    rsiSeries,
     findCross,
     findRecover,
     findRsiRebound,
