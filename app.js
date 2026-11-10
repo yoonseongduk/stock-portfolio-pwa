@@ -1464,7 +1464,8 @@ function setupAutoFill() {
 }
 
 // ===== 과거 시세 채우기 (design/08_가격히스토리.md) =====
-const BACKFILL_COVER_DAYS = 7; // 첫 매수일에서 이 일수 안에 기록이 시작되면 이미 채워진 것으로 본다
+const BACKFILL_COVER_DAYS = 7; // 채우기 시작일에서 이 일수 안에 기록이 시작되면 이미 채워진 것으로 본다
+const BACKFILL_MIN_DAYS = 365; // 첫 매수일이 이보다 최근이어도 최소 이만큼(일) 과거부터 채운다 (CSV로 가져온 임시 거래일 대비, D23)
 
 // 한 종목의 일별 시세를 첫 매수일부터 오늘까지 받아 [{price_date, open_price, ...}] 로 돌려준다.
 async function fetchPriceHistoryRange(marketKind, symbol, fromDate) {
@@ -1529,12 +1530,22 @@ function firstTradeDateOf(key, transactions) {
   return dates.length ? dates.sort()[0] : "";
 }
 
+// 과거 시세 채우기 시작일: 첫 매수일과 '오늘-BACKFILL_MIN_DAYS' 중 더 이른 날. 거래가 없으면 빈 문자열.
+function backfillStartDate(key, transactions, today = new Date()) {
+  const first = firstTradeDateOf(key, transactions);
+  if (!first) return "";
+  const d = new Date(today.getTime() - BACKFILL_MIN_DAYS * 24 * 60 * 60 * 1000);
+  const pad = (n) => String(n).padStart(2, "0");
+  const minStart = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  return first < minStart ? first : minStart;
+}
+
 // 한 종목의 과거 시세를 채운다. 분당 한도 오류(429)는 기다렸다가 1번 다시 시도한다.
 async function backfillOne(marketKind, stockName) {
   const key = holdingKey(marketKind, stockName);
   const symbol = loadSymbols()[key];
   if (!symbol) return { ok: false, message: "시세 코드가 없습니다" };
-  const from = firstTradeDateOf(key, loadTransactions());
+  const from = backfillStartDate(key, loadTransactions());
   if (!from) return { ok: false, message: "거래내역이 없습니다" };
   const run = () => fetchPriceHistoryRange(marketKind, symbol, from);
   try {
@@ -1565,7 +1576,7 @@ async function backfillAll() {
   holdings.forEach((h) => {
     const key = holdingKey(h.market_kind, h.stock_name);
     if (!symbols[key]) return;
-    const from = firstTradeDateOf(key, transactions);
+    const from = backfillStartDate(key, transactions);
     const first = (history[key] || [])[0];
     const limit = new Date(new Date(from + "T00:00:00").getTime() + BACKFILL_COVER_DAYS * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
     if (first && first.price_date <= limit) covered++;
