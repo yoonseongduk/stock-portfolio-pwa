@@ -1088,17 +1088,19 @@ function sectorOptionsHtml(choices, current) {
 }
 
 // 가격 추이 차트(SVG). 종가 선 + 내 평균단가 점선. 기록이 2일 미만이면 안내만 돌려준다.
-// 그래프에 겹쳐 그릴 이동평균선: 단기·장기(설정의 기간)와 120일선. 색은 고정.
-const CHART_MA_COLORS = { short: "#34d399", long: "#a78bfa", extra: "#f472b6" };
-const CHART_LAYERS_KEY = "stockChartLayers_v1"; // chart_layer_list: 그래프에 켜 둔 이동평균선 (화면 설정이라 백업 대상 아님)
+// 그래프에 겹쳐 그릴 수 있는 이동평균선(거래일)과 색. 기본은 단기 20일선과 장기 200일선. 시그널 판정(20·60일선 교차)과는 별개다.
+const CHART_MA_PERIODS = [20, 60, 120, 200];
+const CHART_MA_COLORS = { 20: "#34d399", 60: "#a78bfa", 120: "#f472b6", 200: "#e2e8f0" };
+const CHART_LAYERS_DEFAULT = [20, 200];
+const CHART_LAYERS_KEY = "stockChartLayers_v2"; // chart_layer_list: 그래프에 켜 둔 이동평균선 기간 (화면 설정이라 백업 대상 아님)
 const chartLayersOn = (() => {
   try {
     const saved = JSON.parse(localStorage.getItem(CHART_LAYERS_KEY) || "null");
-    if (Array.isArray(saved)) return new Set(saved);
+    if (Array.isArray(saved)) return new Set(saved.filter((n) => CHART_MA_PERIODS.includes(n)));
   } catch (e) {
     // 저장값을 못 읽으면 기본값으로
   }
-  return new Set(["short", "long"]);
+  return new Set(CHART_LAYERS_DEFAULT);
 })();
 function saveChartLayers() {
   try {
@@ -1107,12 +1109,8 @@ function saveChartLayers() {
     // 저장소를 못 쓰면 기억만 건너뛴다
   }
 }
-function chartMaSpecs(settings) {
-  return [
-    { id: "short", period: settings.sma_short_period },
-    { id: "long", period: settings.sma_long_period },
-    { id: "extra", period: 120 },
-  ].map((m) => ({ ...m, color: CHART_MA_COLORS[m.id] }));
+function chartMaSpecs() {
+  return CHART_MA_PERIODS.map((period) => ({ period, color: CHART_MA_COLORS[period] }));
 }
 
 function priceChartHtml(entries, averagePrice, marketKind, trail = [], maLines = [], maToggleHtml = "") {
@@ -1291,7 +1289,7 @@ function holdingRowHtml(r, ctx) {
           <div class="hd-title">가격 추이 <span class="hd-note">(저장된 시세 ${(ctx.historyByKey[r.key] || []).length}일)</span>
             <button type="button" class="fetch-btn" data-action="backfill-one" data-key="${key}">과거 시세 채우기</button>
           </div>
-          ${priceChartHtml(ctx.historyByKey[r.key] || [], r.h.average_price, market, Signals.trailingStopSeries(ctx.historyByKey[r.key] || [], ctx.signalSettings.trail_lookback_days, ctx.signalSettings.trail_atr_multiple, ctx.atrPeriod), chartMaSpecs(ctx.signalSettings).filter((m) => chartLayersOn.has(m.id)).map((m) => ({ ...m, points: Signals.smaSeries(ctx.historyByKey[r.key] || [], m.period) })), maToggleHtml(ctx.signalSettings))}
+          ${priceChartHtml(ctx.historyByKey[r.key] || [], r.h.average_price, market, Signals.trailingStopSeries(ctx.historyByKey[r.key] || [], ctx.signalSettings.trail_lookback_days, ctx.signalSettings.trail_atr_multiple, ctx.atrPeriod), chartMaSpecs().filter((m) => chartLayersOn.has(m.period)).map((m) => ({ ...m, points: Signals.smaSeries(ctx.historyByKey[r.key] || [], m.period) })), maToggleHtml())}
         </div>
         <div class="hd-section">
           <div class="hd-title">배당 ${div.count}건${div.count > 0 ? ` · 합계 ${formatMoney(div.total, market)}` : ""}</div>
@@ -2009,24 +2007,24 @@ function styleRowHtml(r) {
 }
 
 // 그래프 아래의 이동평균선 켜기·끄기 버튼
-function maToggleHtml(settings) {
-  const chips = chartMaSpecs(settings)
+function maToggleHtml() {
+  const chips = chartMaSpecs()
     .map(
       (m) =>
-        `<button type="button" class="chip pc-ma-chip ${chartLayersOn.has(m.id) ? "active" : ""}" data-action="chart-ma" data-layer="${m.id}" style="border-color:${m.color}">${m.period}일선</button>`
+        `<button type="button" class="chip pc-ma-chip ${chartLayersOn.has(m.period) ? "active" : ""}" data-action="chart-ma" data-layer="${m.period}" style="border-color:${m.color}">${m.period}일선</button>`
     )
     .join("");
   return `<div class="pc-toggles"><span class="hd-note">이동평균선 ${glossaryBtn("sma")}</span>${chips}
-    <span class="hd-note">단기선이 장기선 아래면 하락 흐름 ${glossaryBtn("ma_alignment")}</span></div>`;
+    <span class="hd-note">기본: 단기 20일선 + 장기 200일선 · 단기선이 장기선 아래면 하락 흐름 ${glossaryBtn("ma_alignment")}</span></div>`;
 }
 
 function setupSignalActions() {
   document.getElementById("holdings-area").addEventListener("click", (event) => {
     const chip = event.target.closest('[data-action="chart-ma"]');
     if (!chip) return;
-    const id = chip.dataset.layer;
-    if (chartLayersOn.has(id)) chartLayersOn.delete(id);
-    else chartLayersOn.add(id);
+    const period = Number(chip.dataset.layer);
+    if (chartLayersOn.has(period)) chartLayersOn.delete(period);
+    else chartLayersOn.add(period);
     saveChartLayers();
     renderHoldingsOnly();
   });
