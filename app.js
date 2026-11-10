@@ -1275,6 +1275,7 @@ function holdingRowHtml(r, ctx) {
     r.sector_name ? `<span class="tag tag-sector">${escapeHtml(r.sector_name)}</span>` : "",
     r.holding_style_kind === "trade" ? alertBadgeHtml(ctx.alertRules[r.key]) : "",
     signalBadgeHtml(r.signal),
+    fundBadgesHtml(r),
     weightBadgeHtml(ctx, r.key),
   ].join("");
   const marketTotal = ctx.marketTotals[market] || 0;
@@ -1403,6 +1404,12 @@ function renderHoldings(holdings, prices, symbols, info = {}, transactions = [],
   const historyMap = loadPriceHistory();
   const atrPeriod = loadAlertSettings().atr_period;
   allRows.forEach((r) => (r.signal = Signals.computeSignal(historyMap[r.key], signalSettings, atrPeriod)));
+  const fundMapAll = loadFundamentals();
+  const fundSettings = loadFundSignalSettings();
+  allRows.forEach((r) => {
+    r.health = FundSignals.assessHealth(Fundamentals.yearsOf(fundMapAll, r.key), fundSettings);
+    r.combined = FundSignals.combinedView(r.signal.signal_state, r.health.health_state);
+  });
 
   if (allRows.length === 0) {
     holdingsArea.innerHTML = '<p class="empty-message">아직 보유 중인 종목이 없습니다.</p>';
@@ -1432,7 +1439,7 @@ function renderHoldings(holdings, prices, symbols, info = {}, transactions = [],
   const sectorChoices = [...new Set([...DEFAULT_SECTORS, ...allRows.map((r) => r.sector_name).filter(Boolean)])].sort((a, b) =>
     a.localeCompare(b, "ko")
   );
-  const ctx = { marketTotals, tradesByKey, dividendByKey, sectorChoices, historyByKey: historyMap, signalSettings, atrPeriod, alertRules: loadAlertRules(), weightOver: computeWeightOver(allRows), fundMap: loadFundamentals(), valHistory: loadValuations(), sharesMap: loadListedShares(), corpIds: loadCorpIds() };
+  const ctx = { marketTotals, tradesByKey, dividendByKey, sectorChoices, historyByKey: historyMap, signalSettings, atrPeriod, alertRules: loadAlertRules(), weightOver: computeWeightOver(allRows), fundMap: fundMapAll, valHistory: loadValuations(), sharesMap: loadListedShares(), corpIds: loadCorpIds() };
 
   const groups = groupHoldingRows(rows, holdingsView);
   const sectorOptions = [...new Set(allRows.map((r) => r.sector_name).filter(Boolean))]
@@ -2074,7 +2081,7 @@ function fundamentalsSectionHtml(r, ctx) {
           <td><button type="button" class="gl-btn" data-action="fund-del-year" data-key="${keyAttr}" data-year="${s.fiscal_year}" aria-label="${s.fiscal_year}년 삭제" title="${s.fiscal_year}년 삭제">×</button></td></tr>`
       )
       .join("");
-    body = `<div class="fund-tiles">${tiles}</div>${valueLine}${snapLine}${histLine}${corpNote}
+    body = `${fundHealthHtml(r, ctx)}<div class="fund-tiles">${tiles}</div>${valueLine}${snapLine}${histLine}${corpNote}
       <div class="fund-table-wrap"><table class="fund-table"><thead><tr><th>연도</th><th>매출</th><th>영업이익</th><th>순이익</th><th>자산</th><th>부채</th><th>자본</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
       ${fundBarsHtml(list.slice(-6))}
       <div class="hd-note">출처: ${list.map((s) => s.fiscal_year + " " + ({ twelvedata: "Twelve Data", datagokr: "공공데이터포털", manual: "직접 입력", csv: "CSV" }[s.source_kind] || s.source_kind)).slice(-6).join(", ")}</div>`;
@@ -2426,6 +2433,184 @@ function setupFundamentals() {
   });
 }
 // ===== 기업 현황 브리핑 END =====
+
+// ===== 재무 건강·기업 이벤트·종합 판단 (design/13_재무시그널과기업이벤트.md) =====
+// 계산은 js/fund_signals.js(FundSignals)가 하고, 여기서는 저장·화면·이벤트만 이어 준다.
+const FUND_EVENTS_KEY = "stockFundEvents_v2"; // fund_event_map: holding_key -> 이벤트 상태
+const FUND_SIGNAL_SETTINGS_KEY = "stockFundSignalSettings_v2"; // fund_signal_settings: 기준값(수정 영역)
+
+function loadFundEvents() {
+  try {
+    const map = JSON.parse(localStorage.getItem(FUND_EVENTS_KEY) || "{}");
+    return map && typeof map === "object" ? map : {};
+  } catch (e) {
+    return {};
+  }
+}
+function saveFundEvents(map) {
+  localStorage.setItem(FUND_EVENTS_KEY, JSON.stringify(map));
+}
+function loadFundSignalSettings() {
+  try {
+    return FundSignals.mergeFundSettings(JSON.parse(localStorage.getItem(FUND_SIGNAL_SETTINGS_KEY) || "{}"));
+  } catch (e) {
+    return FundSignals.mergeFundSettings({});
+  }
+}
+function saveFundSignalSettings(settings) {
+  localStorage.setItem(FUND_SIGNAL_SETTINGS_KEY, JSON.stringify(FundSignals.mergeFundSettings(settings)));
+}
+
+// 한 종목의 최신 연도 묶음과 현재가로 계산한 가치 지표(국내는 시세 응답의 상장 주식 수를 우선 사용).
+function fundValuationFor(key, currentPrice, fundMap, sharesMap) {
+  const list = Fundamentals.yearsOf(fundMap, key);
+  const latest = list.length ? list[list.length - 1] : null;
+  if (!latest) return { list, latest: null, metrics: Fundamentals.deriveMetrics(null), val: Fundamentals.computeValuation(0, null) };
+  const withShares = [...list].reverse().find((s) => Number.isFinite(s.shares_count));
+  const listed = sharesMap[key];
+  const shares = listed && Number.isFinite(listed.shares_count) ? listed.shares_count : withShares ? withShares.shares_count : undefined;
+  return { list, latest, metrics: Fundamentals.deriveMetrics(latest), val: Fundamentals.computeValuation(currentPrice, shares ? { ...latest, shares_count: shares } : latest) };
+}
+
+const FUND_EVENT_LABEL = {
+  new_year: "새 결산", turned_profit: "흑자전환", turned_loss: "적자전환", op_surge: "영업이익 급증", op_plunge: "영업이익 급감",
+  capital_impairment: "자본잠식", debt_jump: "부채비율 급증", zone: "가치 구간",
+};
+
+// 보유 종목의 기업 이벤트 상태를 갱신하고 아직 확인하지 않은 이벤트를 돌려준다. 바뀌었을 때만 저장한다.
+function syncFundEvents(holdings, prices) {
+  const fundMap = loadFundamentals();
+  const sharesMap = loadListedShares();
+  const settings = loadFundSignalSettings();
+  const items = holdings.map((h) => {
+    const key = holdingKey(h.market_kind, h.stock_name);
+    const { list, val } = fundValuationFor(key, prices[key] || 0, fundMap, sharesMap);
+    return { key, years: list, zone: FundSignals.valuationZone(val, settings) };
+  });
+  const result = FundSignals.evaluateFundEvents(loadFundEvents(), items, settings, new Date().toISOString());
+  if (result.changed) saveFundEvents(result.event_map);
+  return result;
+}
+
+function fundBadgesHtml(r) {
+  const out = [];
+  if (r.combined && r.combined.tone === "bad") out.push(`<span class="fund-badge fund-bad">${r.combined.label}</span>`);
+  if (r.health && (r.health.health_state === "danger" || r.health.health_state === "caution")) {
+    out.push(`<span class="fund-badge fund-${r.health.health_state}">${FundSignals.HEALTH_LABEL[r.health.health_state]}</span>`);
+  }
+  return out.join("");
+}
+
+// 종목 상세의 '재무 건강·종합 판단' 상자.
+function fundHealthHtml(r, ctx) {
+  const h = r.health;
+  if (!h || h.health_state === "insufficient") return "";
+  const reasons = h.reasons.map((x) => `<li class="fh-${x.tone}">${escapeHtml(x.text)}</li>`).join("");
+  const c = r.combined;
+  return `<div class="fund-health">
+    <div><span class="fund-badge fund-${h.health_state}">${FundSignals.HEALTH_LABEL[h.health_state]}</span> ${glossaryBtn("fund_health")} <span class="hd-note">${h.latest_year}년 결산 기준 · 참고용</span></div>
+    ${reasons ? `<ul class="hd-list">${reasons}</ul>` : ""}
+    ${c ? `<div class="fund-combined fund-combined-${c.tone}"><strong>종합 판단: ${escapeHtml(c.label)}</strong> ${glossaryBtn("combined_view")}<br />${escapeHtml(c.text)}</div>` : ""}
+  </div>`;
+}
+
+// 현황 화면의 '기업 이벤트' 배너: 확인하지 않은 이벤트만 보인다.
+function renderFundEventBanner(pending) {
+  const area = document.getElementById("fund-event-banner-area");
+  if (!area) return;
+  if (pending.length === 0) {
+    area.innerHTML = "";
+    return;
+  }
+  const items = pending
+    .map(
+      (e) => `<div class="alert-item" data-key="${escapeHtml(e.key)}" data-event-id="${escapeHtml(e.id)}">
+        <span class="fund-badge fund-event">${FUND_EVENT_LABEL[e.kind] || "이벤트"}</span>
+        <span class="alert-item-text"><strong>${escapeHtml(splitHoldingKey(e.key).stock_name)}</strong><small>${escapeHtml(e.text)}</small></span>
+        <button type="button" class="fetch-btn" data-action="fund-event-go">보기</button>
+        <button type="button" class="fetch-btn" data-action="fund-event-ack">확인</button>
+      </div>`
+    )
+    .join("");
+  area.innerHTML = `<div class="card alert-banner fund-event-banner">
+    <div class="alert-banner-head"><strong>기업 이벤트 ${pending.length}건 ${glossaryBtn("fund_health")}</strong>
+      <button type="button" class="fetch-btn" data-action="fund-event-ack-all">모두 확인</button></div>
+    <div class="hint-text">공시 재무로 계산한 참고 정보이며 투자 권유가 아닙니다.</div>
+    ${items}</div>`;
+}
+
+function setupFundSignals() {
+  // 배너에 보이는 이벤트(.alert-item)를 확인 처리한다. 지금 화면에 있는 항목의 번호를 그대로 쓴다.
+  const acknowledge = (items) => {
+    const map = loadFundEvents();
+    items.forEach(({ key, id }) => {
+      map[key] = FundSignals.acknowledgeEvents(map[key], [id]);
+    });
+    saveFundEvents(map);
+    render();
+  };
+  document.getElementById("fund-event-banner-area").addEventListener("click", (event) => {
+    if (event.target.closest('[data-action="fund-event-ack-all"]')) {
+      acknowledge([...document.querySelectorAll("#fund-event-banner-area .alert-item")].map((el) => ({ key: el.dataset.key, id: el.dataset.eventId })));
+      return;
+    }
+    const item = event.target.closest(".alert-item");
+    if (!item) return;
+    if (event.target.closest('[data-action="fund-event-ack"]')) {
+      acknowledge([{ key: item.dataset.key, id: item.dataset.eventId }]);
+    } else if (event.target.closest('[data-action="fund-event-go"]')) {
+      openHoldingKeys.add(item.dataset.key);
+      showScreen("holdings");
+      renderHoldingsOnly();
+    }
+  });
+}
+
+// 설정 화면의 재무 신호 기준값 10개(수정 영역). 비율 값은 화면에서 %로, 배수는 그대로.
+const FUND_SETTING_FIELDS = [
+  { name: "growth_event_rate", label: "영업이익 급증·급감 기준 (%)", percent: true },
+  { name: "growth_sales_rate", label: "매출 성장·감소 기준 (%)", percent: true },
+  { name: "debt_ratio_low", label: "부채비율 낮음 (%, 이하)", percent: true },
+  { name: "debt_ratio_warn", label: "부채비율 주의 (%, 초과)", percent: true },
+  { name: "debt_ratio_danger", label: "부채비율 위험 (%, 초과)", percent: true },
+  { name: "debt_jump_rate", label: "부채비율 급증 (%p 이상 증가)", percent: true },
+  { name: "roe_good_rate", label: "ROE 양호 (%, 이상)", percent: true },
+  { name: "pbr_low_ratio", label: "PBR 낮은 구간 (배 미만)" },
+  { name: "per_low_ratio", label: "PER 낮은 구간 (배 미만)" },
+  { name: "per_high_ratio", label: "PER 높은 구간 (배 초과)" },
+];
+
+function renderFundSignalSettings() {
+  const area = document.getElementById("fund-signal-settings-area");
+  if (!area) return;
+  const s = loadFundSignalSettings();
+  area.innerHTML = FUND_SETTING_FIELDS.map((f) => {
+    const shown = f.percent ? Math.round(s[f.name] * 1000) / 10 : s[f.name];
+    return `<label>${f.label}<input type="number" step="any" min="0" data-fund-setting="${f.name}" value="${shown}" /></label>`;
+  }).join("");
+}
+
+function setupFundSignalSettings() {
+  renderFundSignalSettings();
+  document.getElementById("fund-signal-settings-area").addEventListener("change", (event) => {
+    const input = event.target.closest("[data-fund-setting]");
+    if (!input) return;
+    const field = FUND_SETTING_FIELDS.find((f) => f.name === input.dataset.fundSetting);
+    const value = Number(input.value);
+    const next = loadFundSignalSettings();
+    if (Number.isFinite(value) && value > 0) next[field.name] = field.percent ? value / 100 : value;
+    saveFundSignalSettings(next);
+    renderFundSignalSettings();
+    render();
+  });
+  document.getElementById("fund-signal-settings-reset").addEventListener("click", () => {
+    localStorage.removeItem(FUND_SIGNAL_SETTINGS_KEY);
+    renderFundSignalSettings();
+    render();
+  });
+}
+// ===== 재무 건강·기업 이벤트·종합 판단 END =====
+
 
 // ===== 시세 시그널·투자 성격·용어집 (design/11_시그널과용어집.md) =====
 // 계산은 js/signals.js(Signals)와 js/glossary.js(Glossary)가 하고, 여기서는 저장·화면·이벤트만 이어 준다.
@@ -3015,6 +3200,7 @@ function render() {
   renderKnownStockNames(transactions);
   renderAlertBanner(syncAlerts(holdings, prices).pending); // 목표가·손절가 규칙 맞춤·판정 (보유 화면보다 먼저)
   renderSignalBanner(syncSignals(holdings).pending); // 시세 시그널 변경 알림
+  renderFundEventBanner(syncFundEvents(holdings, prices).pending); // 기업 이벤트(재무·가치 구간) 알림
 
   renderDashboard(holdings, prices);
   renderShare(holdings, prices);
@@ -3995,6 +4181,8 @@ function collectBackupData() {
     valuation_history_map: loadValuations(),
     listed_shares_map: loadListedShares(),
     corp_id_map: loadCorpIds(),
+    fund_event_map: loadFundEvents(),
+    fund_signal_settings: loadFundSignalSettings(),
     us_price_api_key: loadApiKey(),
     kr_price_api_key: loadKrApiKey(),
   };
@@ -4037,6 +4225,8 @@ async function handleJsonImportFile(file) {
   if (data.valuation_history_map && typeof data.valuation_history_map === "object") saveValuations(data.valuation_history_map);
   if (data.listed_shares_map && typeof data.listed_shares_map === "object") localStorage.setItem(SHARES_KEY, JSON.stringify(data.listed_shares_map));
   if (data.corp_id_map && typeof data.corp_id_map === "object") saveCorpIds(data.corp_id_map);
+  if (data.fund_event_map && typeof data.fund_event_map === "object") saveFundEvents(data.fund_event_map);
+  if (data.fund_signal_settings && typeof data.fund_signal_settings === "object") saveFundSignalSettings(data.fund_signal_settings);
   if (typeof data.us_price_api_key === "string") saveApiKey(data.us_price_api_key);
   if (typeof data.kr_price_api_key === "string") saveKrApiKey(data.kr_price_api_key);
 
@@ -4044,6 +4234,7 @@ async function handleJsonImportFile(file) {
   document.getElementById("kr-api-key-input").value = loadKrApiKey();
   renderAlertSettings();
   renderSignalSettings();
+  renderFundSignalSettings();
 
   render();
   setJsonStatus("백업을 불러왔습니다.");
@@ -4311,6 +4502,8 @@ setupAlertSettings();
 setupSignalActions();
 setupSignalSettings();
 setupFundamentals();
+setupFundSignals();
+setupFundSignalSettings();
 setupGlossary();
 setupRefreshAll();
 setupBulkSymbols();

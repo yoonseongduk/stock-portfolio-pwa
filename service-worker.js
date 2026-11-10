@@ -16,6 +16,7 @@ const CACHE_FILES = [
   "./js/alert_rules.js",
   "./js/signals.js",
   "./js/fundamentals.js",
+  "./js/fund_signals.js",
   "./js/glossary.js",
   "./app.js",
   "./manifest.json",

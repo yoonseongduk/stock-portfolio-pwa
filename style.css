@@ -1198,3 +1198,23 @@ details.help summary {
 .fund-crno { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 6px; margin-top: 8px; }
 .fund-crno label { display: flex; flex-direction: column; gap: 2px; font-size: 0.78rem; color: #cbd5e1; flex: 1 1 200px; }
 .fund-crno input { padding: 4px 6px; background: #0f172a; color: #e2e8f0; border: 1px solid #334155; border-radius: 6px; }
+
+/* ===== 재무 건강·기업 이벤트·종합 판단 (design/13_재무시그널과기업이벤트.md) ===== */
+#fund-event-banner-area:empty { display: none; }
+.fund-event-banner { border-left-color: #a78bfa; }
+.fund-badge { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 0.72rem; font-weight: 700; color: #fff; }
+.fund-good { background: #15803d; }
+.fund-normal { background: #475569; }
+.fund-caution { background: #b45309; }
+.fund-danger { background: #b91c1c; }
+.fund-bad { background: #7f1d1d; }
+.fund-event { background: #6d28d9; }
+.fund-health { background: #0b1220; border: 1px solid #1e293b; border-radius: 8px; padding: 8px; margin: 6px 0; }
+.fh-good { color: #6ee7b7; }
+.fh-warn { color: #fcd34d; }
+.fh-danger { color: #fca5a5; }
+.fund-combined { margin-top: 6px; padding: 6px 8px; border-radius: 6px; font-size: 0.85rem; }
+.fund-combined-bad { background: rgba(185, 28, 28, 0.2); }
+.fund-combined-good { background: rgba(21, 128, 61, 0.2); }
+.fund-combined-warn { background: rgba(180, 83, 9, 0.2); }
+.fund-combined-info { background: rgba(71, 85, 105, 0.3); }

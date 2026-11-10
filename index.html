@@ -24,6 +24,7 @@
     <section class="screen" data-screen="home" hidden>
       <div id="alert-banner-area"></div>
       <div id="signal-banner-area"></div>
+      <div id="fund-event-banner-area"></div>
       <div class="card dashboard-card">
         <div id="dashboard-area">
           <p class="empty-message">아직 보유 중인 종목이 없습니다.</p>
@@ -132,6 +133,9 @@
         <p class="hint-text">시세 시그널(이동평균 교차·RSI·추세 이탈)의 기준입니다. 용어는 더보기 &gt; 용어집에서 찾아볼 수 있습니다.</p>
         <div id="signal-settings-area" class="alert-settings-grid"></div>
         <button type="button" class="fetch-btn" id="signal-settings-reset">시그널 기준 기본값으로</button>
+        <p class="hint-text">재무 건강·기업 이벤트 기준입니다. 업종마다 정상 부채비율이 다르니(금융·건설은 높음) 필요하면 올려 쓰세요.</p>
+        <div id="fund-signal-settings-area" class="alert-settings-grid"></div>
+        <button type="button" class="fetch-btn" id="fund-signal-settings-reset">재무 기준 기본값으로</button>
       </details>
     </section>
 
@@ -361,6 +365,7 @@
   <script src="./js/alert_rules.js"></script>
   <script src="./js/signals.js"></script>
   <script src="./js/fundamentals.js"></script>
+  <script src="./js/fund_signals.js"></script>
   <script src="./js/glossary.js"></script>
   <script src="./app.js"></script>
 </body>
