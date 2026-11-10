@@ -1,0 +1,265 @@
+// 기업 현황 브리핑 계산 (순수 함수 모음). 설계: design/12_기업현황브리핑.md
+// - 연도별 재무 수치를 종목마다 한 묶음으로 저장·병합하고, 영업이익률·부채비율·ROE·PER·PBR 을 계산한다.
+// - 화면·저장소·시간에 의존하지 않는다. 브라우저에서는 window.Fundamentals, node 시험에서는 require() 로 쓴다.
+// - 금액은 원래 통화 단위 그대로(국내 원, 미국 달러). 수집 출처가 달라도(자동·직접 입력·CSV) 같은 형식으로 저장한다.
+(function (root) {
+  "use strict";
+
+  // 연도별 한 묶음(financial_summary)의 금액 필드. 표준 변수명(변수사전)과 같다.
+  const AMOUNT_FIELDS = [
+    "sales_amount", // 매출액
+    "operating_profit_amount", // 영업이익
+    "net_income_amount", // 당기순이익
+    "total_assets_amount", // 자산총계
+    "total_liabilities_amount", // 부채총계
+    "total_equity_amount", // 자본총계
+    "shares_count", // 발행 주식 수(PER·PBR 계산용)
+  ];
+  const SOURCE_KINDS = ["datagokr", "twelvedata", "manual", "csv"];
+  const isNum = (v) => typeof v === "number" && Number.isFinite(v);
+
+  /** 한 묶음을 표준 형태로 맞춘다. 숫자가 아닌 금액 필드는 뺀다. 연도가 없으면 null. */
+  function normalizeSummary(raw) {
+    if (!raw) return null;
+    const year = Number(raw.fiscal_year);
+    if (!Number.isInteger(year) || year < 1900 || year > 2200) return null;
+    const out = { fiscal_year: year };
+    for (const f of AMOUNT_FIELDS) {
+      const v = raw[f] === "" || raw[f] === null || raw[f] === undefined ? NaN : Number(raw[f]);
+      if (Number.isFinite(v)) out[f] = v;
+    }
+    if (raw.fiscal_date) out.fiscal_date = String(raw.fiscal_date).slice(0, 10);
+    if (raw.statement_kind) out.statement_kind = raw.statement_kind;
+    if (raw.currency_kind) out.currency_kind = raw.currency_kind;
+    out.source_kind = SOURCE_KINDS.includes(raw.source_kind) ? raw.source_kind : "manual";
+    if (raw.collected_at) out.collected_at = raw.collected_at;
+    return out;
+  }
+
+  /**
+   * 한 종목의 연도 묶음을 추가·갱신한다. 같은 연도는 새 값이 있는 필드만 덮어쓰고(없는 필드는 기존 값 유지) 새 연도는 추가한다.
+   * @param {Record<string, Record<string, object>>} map holding_key -> fiscal_year -> summary
+   * @returns {{map:object, added:boolean, changed:boolean}}
+   */
+  function upsertYear(map, key, summary) {
+    const s = normalizeSummary(summary);
+    if (!s) return { map, added: false, changed: false };
+    const next = { ...(map || {}) };
+    const years = { ...(next[key] || {}) };
+    const before = years[s.fiscal_year];
+    const merged = { ...(before || {}), ...s };
+    const changed = JSON.stringify(merged) !== JSON.stringify(before);
+    years[s.fiscal_year] = merged;
+    next[key] = years;
+    return { map: next, added: !before, changed };
+  }
+
+  /** 종목의 연도 묶음을 오래된 해부터 정렬해 돌려준다. */
+  function yearsOf(map, key) {
+    return Object.values((map || {})[key] || {}).sort((a, b) => a.fiscal_year - b.fiscal_year);
+  }
+
+  /** 가장 최근 연도 묶음(없으면 null). */
+  function latestSummary(map, key) {
+    const list = yearsOf(map, key);
+    return list.length ? list[list.length - 1] : null;
+  }
+
+  const ratio = (a, b) => (isNum(a) && isNum(b) && b !== 0 ? a / b : null);
+
+  /**
+   * 재무 묶음에서 바로 나오는 비율(0~1 소수). 자본이 0 이하이면 자본 기준 비율은 null.
+   * @returns {{operating_margin_rate:number|null, net_margin_rate:number|null, debt_ratio_rate:number|null, roe_rate:number|null}}
+   */
+  function deriveMetrics(s) {
+    if (!s) return { operating_margin_rate: null, net_margin_rate: null, debt_ratio_rate: null, roe_rate: null };
+    const eq = isNum(s.total_equity_amount) && s.total_equity_amount > 0 ? s.total_equity_amount : null;
+    return {
+      operating_margin_rate: ratio(s.operating_profit_amount, s.sales_amount),
+      net_margin_rate: ratio(s.net_income_amount, s.sales_amount),
+      debt_ratio_rate: ratio(s.total_liabilities_amount, eq),
+      roe_rate: ratio(s.net_income_amount, eq),
+    };
+  }
+
+  /**
+   * 현재가와 최근 연도 묶음으로 시가총액·PER·PBR 을 계산한다. 주식 수가 없으면 모두 null.
+   * 순이익이 0 이하(적자)면 PER 은 null, 자본이 0 이하면 PBR 은 null.
+   */
+  function computeValuation(price, s) {
+    const none = { market_cap_amount: null, per_ratio: null, pbr_ratio: null };
+    if (!s || !isNum(price) || price <= 0 || !isNum(s.shares_count) || s.shares_count <= 0) return none;
+    const cap = price * s.shares_count;
+    return {
+      market_cap_amount: cap,
+      per_ratio: isNum(s.net_income_amount) && s.net_income_amount > 0 ? cap / s.net_income_amount : null,
+      pbr_ratio: isNum(s.total_equity_amount) && s.total_equity_amount > 0 ? cap / s.total_equity_amount : null,
+    };
+  }
+
+  /**
+   * Twelve Data 응답(income_statement, balance_sheet, statistics)을 연도 묶음 목록과 가치 지표 스냅샷으로 바꾼다.
+   * 없는 응답은 null 로 넘기면 건너뛴다. 연도는 결산일(fiscal_date)의 해로 정한다.
+   */
+  function parseTwelveData(income, balance, stats, nowIso) {
+    const byDate = new Map();
+    const currency = (income && income.meta && income.meta.currency) || (balance && balance.meta && balance.meta.currency) || "USD";
+    const put = (date, fields) => {
+      if (!date) return;
+      byDate.set(date, { ...(byDate.get(date) || { fiscal_date: date }), ...fields });
+    };
+    const list = (res, name) => (res && Array.isArray(res[name]) ? res[name] : []);
+    for (const e of list(income, "income_statement")) {
+      put(e.fiscal_date, {
+        sales_amount: e.sales,
+        operating_profit_amount: e.operating_income,
+        net_income_amount: e.net_income,
+        shares_count: e.basic_shares_outstanding,
+      });
+    }
+    for (const e of list(balance, "balance_sheet")) {
+      put(e.fiscal_date, {
+        total_assets_amount: e.assets && e.assets.total_assets,
+        total_liabilities_amount: e.liabilities && e.liabilities.total_liabilities,
+        total_equity_amount: e.shareholders_equity && e.shareholders_equity.total_shareholders_equity,
+      });
+    }
+    const summaries = [...byDate.values()]
+      .map((v) =>
+        normalizeSummary({
+          ...v,
+          fiscal_year: Number(String(v.fiscal_date).slice(0, 4)),
+          currency_kind: currency,
+          statement_kind: "annual",
+          source_kind: "twelvedata",
+          collected_at: nowIso,
+        })
+      )
+      .filter(Boolean);
+
+    let valuation = null;
+    const st = stats && stats.statistics;
+    if (st) {
+      const vm = st.valuations_metrics || {};
+      const fin = st.financials || {};
+      const ss = st.stock_statistics || {};
+      const div = st.dividends_and_splits || {};
+      const num = (v) => (isNum(v) ? v : null);
+      valuation = {
+        asof_date: (nowIso || "").slice(0, 10),
+        per_ratio: num(vm.trailing_pe),
+        pbr_ratio: num(vm.price_to_book_mrq),
+        roe_rate: num(fin.return_on_equity_ttm),
+        operating_margin_rate: num(fin.operating_margin),
+        market_cap_amount: num(vm.market_capitalization),
+        shares_count: num(ss.shares_outstanding),
+        dividend_yield_rate: num(div.trailing_annual_dividend_yield),
+        source_kind: "twelvedata",
+      };
+      // 최근 연도 묶음에 주식 수가 없으면 통계의 발행 주식 수로 채운다(PER·PBR 계산용)
+      if (valuation.shares_count && summaries.length) {
+        const latest = summaries.reduce((a, b) => (b.fiscal_year > a.fiscal_year ? b : a));
+        if (!isNum(latest.shares_count)) latest.shares_count = valuation.shares_count;
+      }
+    }
+    return { summaries, valuation };
+  }
+
+  /**
+   * 가치 지표 스냅샷을 history 에 넣는다(같은 날짜는 덮어쓰고 날짜순 정렬). 공식 수치 기록용.
+   * @param {Record<string, object[]>} historyMap holding_key -> 스냅샷 목록
+   */
+  function appendValuation(historyMap, key, snapshot) {
+    if (!snapshot || !snapshot.asof_date) return historyMap;
+    const next = { ...(historyMap || {}) };
+    const list = (next[key] || []).filter((e) => e.asof_date !== snapshot.asof_date);
+    list.push(snapshot);
+    list.sort((a, b) => (a.asof_date < b.asof_date ? -1 : 1));
+    next[key] = list;
+    return next;
+  }
+
+  /**
+   * 화면용 큰 금액 표기. 국내는 조·억, 미국은 T·B·M. 없으면 "-".
+   * @param {'kr'|'us'} marketKind
+   */
+  function formatBigAmount(value, marketKind) {
+    if (!isNum(value)) return "-";
+    const sign = value < 0 ? "-" : "";
+    const v = Math.abs(value);
+    if (marketKind === "us") {
+      if (v >= 1e12) return `${sign}$${(v / 1e12).toFixed(2)}T`;
+      if (v >= 1e9) return `${sign}$${(v / 1e9).toFixed(2)}B`;
+      if (v >= 1e6) return `${sign}$${(v / 1e6).toFixed(1)}M`;
+      return `${sign}$${Math.round(v).toLocaleString("en-US")}`;
+    }
+    if (v >= 1e12) return `${sign}${(v / 1e12).toFixed(2)}조원`;
+    if (v >= 1e8) return `${sign}${Math.round(v / 1e8).toLocaleString("ko-KR")}억원`;
+    return `${sign}${Math.round(v).toLocaleString("ko-KR")}원`;
+  }
+
+  // ----- CSV (사용자가 직접 정리한 연도별 재무를 가져오고 내보낸다) -----
+  const CSV_HEADER = ["구분", "종목명", "연도", "매출액", "영업이익", "순이익", "자산총계", "부채총계", "자본총계", "발행주식수"];
+  const CSV_FIELDS = ["sales_amount", "operating_profit_amount", "net_income_amount", "total_assets_amount", "total_liabilities_amount", "total_equity_amount", "shares_count"];
+  const MARKET_LABEL_TO_KIND = { 국내: "kr", 미국: "us" };
+
+  /** 저장된 연도 묶음을 CSV 줄 목록(머리글 포함)으로 만든다. keys: 내보낼 종목 키 목록(market|name). */
+  function toCsvRows(map, keys) {
+    const rows = [CSV_HEADER];
+    for (const key of keys) {
+      const sep = key.indexOf("|");
+      const market = key.slice(0, sep);
+      const name = key.slice(sep + 1);
+      for (const s of yearsOf(map, key)) {
+        rows.push([market === "us" ? "미국" : "국내", name, s.fiscal_year, ...CSV_FIELDS.map((f) => (isNum(s[f]) ? s[f] : ""))]);
+      }
+    }
+    return rows;
+  }
+
+  /**
+   * CSV 줄(머리글 제외)을 종목 키와 묶음으로 바꾼다. 잘못된 줄은 errors 에 줄 번호와 이유를 담는다.
+   * @returns {{items:{key:string, summary:object}[], errors:string[]}}
+   */
+  function fromCsvRows(rows, nowIso) {
+    const items = [];
+    const errors = [];
+    rows.forEach((cols, idx) => {
+      const lineNo = idx + 2;
+      if (cols.every((c) => String(c).trim() === "")) return;
+      const [marketLabel, name, year, ...amounts] = cols.map((c) => String(c === undefined ? "" : c).trim());
+      const market = MARKET_LABEL_TO_KIND[marketLabel];
+      if (!market) return errors.push(`${lineNo}줄: 구분은 "국내" 또는 "미국"`);
+      if (!name) return errors.push(`${lineNo}줄: 종목명 없음`);
+      const raw = { fiscal_year: Number(year), source_kind: "csv", collected_at: nowIso, currency_kind: market === "us" ? "USD" : "KRW" };
+      CSV_FIELDS.forEach((f, i) => {
+        const text = (amounts[i] || "").replace(/,/g, "");
+        if (text !== "") raw[f] = Number(text);
+      });
+      const bad = CSV_FIELDS.find((f) => raw[f] !== undefined && !Number.isFinite(raw[f]));
+      if (bad) return errors.push(`${lineNo}줄: 숫자가 아닌 값이 있습니다`);
+      const s = normalizeSummary(raw);
+      if (!s) return errors.push(`${lineNo}줄: 연도(예: 2025)를 확인하세요`);
+      items.push({ key: `${market}|${name}`, summary: s });
+    });
+    return { items, errors };
+  }
+
+  const api = {
+    AMOUNT_FIELDS,
+    CSV_HEADER,
+    normalizeSummary,
+    upsertYear,
+    yearsOf,
+    latestSummary,
+    deriveMetrics,
+    computeValuation,
+    parseTwelveData,
+    appendValuation,
+    formatBigAmount,
+    toCsvRows,
+    fromCsvRows,
+  };
+  if (typeof module !== "undefined" && module.exports) module.exports = api;
+  else root.Fundamentals = api;
+})(typeof window !== "undefined" ? window : globalThis);

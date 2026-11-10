@@ -1178,3 +1178,19 @@ details.help summary {
 .rsi-chart { width: 100%; height: auto; display: block; margin-top: 8px; background: #0b1220; border-radius: 6px; }
 .rsi-note { color: #22d3ee; }
 .update-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
+
+/* ===== 기업 브리핑 (design/12_기업현황브리핑.md) ===== */
+.fund-tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin: 6px 0; }
+.fund-tile { display: flex; flex-direction: column; background: #0b1220; border: 1px solid #1e293b; border-radius: 8px; padding: 6px 8px; min-width: 0; }
+.fund-label { font-size: 0.72rem; color: #94a3b8; }
+.fund-tile strong { font-size: 0.95rem; color: #e2e8f0; }
+.fund-tile small { font-size: 0.7rem; color: #94a3b8; }
+.fund-values { display: flex; flex-wrap: wrap; gap: 2px 12px; font-size: 0.85rem; margin-top: 6px; color: #e2e8f0; }
+.fund-table-wrap { overflow-x: auto; margin-top: 8px; }
+.fund-table { border-collapse: collapse; font-size: 0.72rem; width: 100%; white-space: nowrap; }
+.fund-table th, .fund-table td { padding: 3px 5px; text-align: right; border-bottom: 1px solid #1e293b; }
+.fund-table th:first-child, .fund-table td:first-child { text-align: left; }
+.fund-bars { width: 100%; height: auto; display: block; margin-top: 8px; background: #0b1220; border-radius: 6px; }
+.fund-form-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; margin: 6px 0; }
+.fund-form-grid label { display: flex; flex-direction: column; gap: 2px; font-size: 0.78rem; color: #cbd5e1; }
+.fund-form-grid input, .fund-form-grid select { padding: 4px 6px; background: #0f172a; color: #e2e8f0; border: 1px solid #334155; border-radius: 6px; }

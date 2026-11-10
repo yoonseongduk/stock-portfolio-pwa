@@ -61,6 +61,18 @@
           <summary id="symbol-bulk-summary">일괄 찾기 결과</summary>
           <ul id="symbol-bulk-result" class="result-list"></ul>
         </details>
+        <details class="help" id="fund-manage">
+          <summary>기업 정보 관리 (재무 수집·CSV)</summary>
+          <p class="hint-text">종목 상세의 '기업 브리핑'에 쓰는 연도별 재무(매출·영업이익·순이익·자산·부채·자본)를 모읍니다. 미국은 Twelve Data에서 받고(플랜에 따라 안 될 수 있음), 국내와 그 밖의 값은 직접 입력이나 CSV로 넣습니다. 앱이 자동으로 받지는 않고 버튼을 누를 때만 받습니다.</p>
+          <div class="button-row">
+            <button type="button" id="fund-fetch-all-btn" class="secondary-btn">미국 종목 기업 정보 일괄 받기</button>
+            <button type="button" id="fund-export-csv-btn" class="secondary-btn">기업 재무 내보내기</button>
+            <button type="button" id="fund-import-csv-btn" class="secondary-btn">기업 재무 가져오기</button>
+          </div>
+          <input type="file" id="fund-import-csv-file" accept=".csv" style="display:none" />
+          <p id="fund-manage-status" class="hint-text"></p>
+          <p class="hint-text">CSV 머리글: 구분(국내/미국), 종목명, 연도, 매출액, 영업이익, 순이익, 자산총계, 부채총계, 자본총계, 발행주식수 (금액은 원·달러 단위 그대로)</p>
+        </details>
         <details class="help">
           <summary>사용 안내</summary>
           <p class="hint-text">
@@ -346,6 +358,7 @@
   <script src="./version.js"></script>
   <script src="./js/alert_rules.js"></script>
   <script src="./js/signals.js"></script>
+  <script src="./js/fundamentals.js"></script>
   <script src="./js/glossary.js"></script>
   <script src="./app.js"></script>
 </body>

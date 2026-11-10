@@ -1341,6 +1341,7 @@ function holdingRowHtml(r, ctx) {
         ${styleRowHtml(r)}
         ${r.holding_style_kind === "trade" ? alertSectionHtml(r, ctx.alertRules[r.key]) : alertOffNoteHtml()}
         ${signalSectionHtml(r, ctx)}
+        ${fundamentalsSectionHtml(r, ctx)}
         <div class="hd-section">
           <div class="hd-title">거래내역 ${trades.length}건 <span class="hd-note">(수정·삭제는 거래 탭에서)</span></div>
           <ul class="hd-list">${tradeHtml}</ul>
@@ -1429,7 +1430,7 @@ function renderHoldings(holdings, prices, symbols, info = {}, transactions = [],
   const sectorChoices = [...new Set([...DEFAULT_SECTORS, ...allRows.map((r) => r.sector_name).filter(Boolean)])].sort((a, b) =>
     a.localeCompare(b, "ko")
   );
-  const ctx = { marketTotals, tradesByKey, dividendByKey, sectorChoices, historyByKey: historyMap, signalSettings, atrPeriod, alertRules: loadAlertRules(), weightOver: computeWeightOver(allRows) };
+  const ctx = { marketTotals, tradesByKey, dividendByKey, sectorChoices, historyByKey: historyMap, signalSettings, atrPeriod, alertRules: loadAlertRules(), weightOver: computeWeightOver(allRows), fundMap: loadFundamentals(), valHistory: loadValuations() };
 
   const groups = groupHoldingRows(rows, holdingsView);
   const sectorOptions = [...new Set(allRows.map((r) => r.sector_name).filter(Boolean))]
@@ -1922,6 +1923,364 @@ function renderDividends(dividends) {
     )
     .join("");
 }
+
+// ===== 기업 현황 브리핑 (design/12_기업현황브리핑.md) =====
+// 계산은 js/fundamentals.js(Fundamentals)가 하고, 여기서는 저장·수집·화면·이벤트만 이어 준다.
+const FUNDAMENTALS_KEY = "stockFundamentals_v2"; // fundamentals_map: holding_key -> fiscal_year -> financial_summary
+const VALUATIONS_KEY = "stockValuations_v2"; // valuation_history_map: holding_key -> 가치 지표 스냅샷 목록(공식 통계 수집 기록)
+
+function loadFundamentals() {
+  try {
+    const raw = localStorage.getItem(FUNDAMENTALS_KEY);
+    const map = raw ? JSON.parse(raw) : {};
+    return map && typeof map === "object" ? map : {};
+  } catch (e) {
+    console.error("기업 재무를 읽는 중 오류:", e);
+    return {};
+  }
+}
+function saveFundamentals(map) {
+  localStorage.setItem(FUNDAMENTALS_KEY, JSON.stringify(map));
+}
+function loadValuations() {
+  try {
+    const raw = localStorage.getItem(VALUATIONS_KEY);
+    const map = raw ? JSON.parse(raw) : {};
+    return map && typeof map === "object" ? map : {};
+  } catch (e) {
+    return {};
+  }
+}
+function saveValuations(map) {
+  localStorage.setItem(VALUATIONS_KEY, JSON.stringify(map));
+}
+
+const fmtBig = (v, market) => Fundamentals.formatBigAmount(v, market);
+const fmtRate = (v) => (v === null || v === undefined || !Number.isFinite(v) ? "-" : `${(v * 100).toFixed(1)}%`);
+const fmtX = (v) => (v === null || v === undefined || !Number.isFinite(v) ? "-" : `${v.toFixed(1)}배`);
+
+// 연도별 매출·영업이익을 막대로 그린 작은 그래프(왼쪽이 오래된 해). 음수(영업적자)는 0선 아래로 그린다.
+function fundBarsHtml(list) {
+  if (list.length < 2) return "";
+  const W = 300;
+  const H = 70;
+  const vals = list.flatMap((s) => [s.sales_amount, s.operating_profit_amount]).filter((v) => Number.isFinite(v));
+  if (vals.length === 0) return "";
+  const top = Math.max(0, ...vals);
+  const bottom = Math.min(0, ...vals);
+  const span = top - bottom || 1;
+  const zeroY = 6 + ((top - 0) / span) * (H - 20);
+  const gw = (W - 8) / list.length;
+  const bw = Math.min(16, gw / 2.6);
+  const y = (v) => 6 + ((top - v) / span) * (H - 20);
+  const bar = (v, x, cls, color) =>
+    Number.isFinite(v) ? `<rect class="${cls}" x="${x.toFixed(1)}" y="${Math.min(y(v), zeroY).toFixed(1)}" width="${bw.toFixed(1)}" height="${Math.max(1, Math.abs(y(v) - zeroY)).toFixed(1)}" fill="${color}" />` : "";
+  const bars = list
+    .map((s, i) => {
+      const cx = 4 + gw * i + gw / 2;
+      return `${bar(s.sales_amount, cx - bw - 1, "fb-sales", "#60a5fa")}${bar(s.operating_profit_amount, cx + 1, "fb-op", s.operating_profit_amount >= 0 ? "#34d399" : "#f87171")}<text x="${cx.toFixed(1)}" y="${H - 2}" text-anchor="middle" font-size="8" fill="#94a3b8">${String(s.fiscal_year).slice(2)}</text>`;
+    })
+    .join("");
+  return `<svg class="fund-bars" viewBox="0 0 ${W} ${H}" role="img" aria-label="연도별 매출과 영업이익">
+    <line x1="4" x2="${W - 4}" y1="${zeroY.toFixed(1)}" y2="${zeroY.toFixed(1)}" stroke="#475569" stroke-width="0.6" />${bars}</svg>
+    <div class="hd-note"><span style="color:#60a5fa">■ 매출액</span> <span style="color:#34d399">■ 영업이익</span> (적자는 <span style="color:#f87171">■</span>) · 가로축은 결산 연도(끝 두 자리)</div>`;
+}
+
+const FUND_UNITS = {
+  kr: [["억원", 1e8], ["백만원", 1e6], ["원", 1]],
+  us: [["백만달러", 1e6], ["십억달러", 1e9], ["달러", 1]],
+};
+
+// 종목 상세의 '기업 브리핑' 영역.
+function fundamentalsSectionHtml(r, ctx) {
+  const key = r.key;
+  const market = r.h.market_kind;
+  const list = Fundamentals.yearsOf(ctx.fundMap, key);
+  const latest = list.length ? list[list.length - 1] : null;
+  const snaps = (ctx.valHistory[key] || []).slice(-5);
+  const lastSnap = snaps.length ? snaps[snaps.length - 1] : null;
+  const keyAttr = escapeHtml(key);
+  const fetchBtn =
+    market === "us"
+      ? `<button type="button" class="fetch-btn" data-action="fund-fetch" data-key="${keyAttr}">기업 정보 받기</button>`
+      : '<span class="hd-note">국내는 직접 입력·CSV (자동 수집은 공공데이터포털 기업재무정보 연결 후)</span>';
+
+  let body;
+  if (!latest) {
+    body = `<div class="hd-note">저장된 기업 정보가 없습니다. ${market === "us" ? "'기업 정보 받기'로 가져오거나" : ""} 직접 입력·CSV로 넣을 수 있습니다.</div>`;
+  } else {
+    const m = Fundamentals.deriveMetrics(latest);
+    const withShares = [...list].reverse().find((s) => Number.isFinite(s.shares_count));
+    const val = Fundamentals.computeValuation(r.currentPrice, withShares ? { ...latest, shares_count: withShares.shares_count } : latest);
+    const tiles = [
+      ["매출액", "sales", latest.sales_amount, null],
+      ["영업이익", "operating_profit", latest.operating_profit_amount, m.operating_margin_rate === null ? null : `영업이익률 ${fmtRate(m.operating_margin_rate)}`],
+      ["순이익", "net_income", latest.net_income_amount, m.net_margin_rate === null ? null : `순이익률 ${fmtRate(m.net_margin_rate)}`],
+      ["자산", "balance_sheet", latest.total_assets_amount, null],
+      ["부채", "balance_sheet", latest.total_liabilities_amount, m.debt_ratio_rate === null ? null : `부채비율 ${fmtRate(m.debt_ratio_rate)}`],
+      ["자본", "balance_sheet", latest.total_equity_amount, m.roe_rate === null ? null : `ROE ${fmtRate(m.roe_rate)}`],
+    ]
+      .map(([label, term, v, sub]) => `<div class="fund-tile"><span class="fund-label">${label} ${glossaryBtn(term)}</span><strong>${fmtBig(v, market)}</strong>${sub ? `<small>${sub}</small>` : ""}</div>`)
+      .join("");
+    const valueLine = `<div class="fund-values">
+      <span>PER ${glossaryBtn("per")} ${fmtX(val.per_ratio)}</span>
+      <span>PBR ${glossaryBtn("pbr")} ${fmtX(val.pbr_ratio)}</span>
+      <span>ROE ${glossaryBtn("roe")} ${fmtRate(m.roe_rate)}</span>
+      <span>시가총액 ${glossaryBtn("market_cap")} ${fmtBig(val.market_cap_amount, market)}</span>
+      <span>부채비율 ${glossaryBtn("debt_ratio")} ${fmtRate(m.debt_ratio_rate)}</span>
+    </div>
+    <div class="hd-note">${latest.fiscal_year}년 결산 기준, 현재가×주식 수로 계산한 값${val.per_ratio === null && val.pbr_ratio === null ? " (주식 수가 없으면 PER·PBR은 계산되지 않습니다. 직접 입력에 주식 수를 넣어 보세요)" : ""}</div>`;
+    const snapLine = lastSnap
+      ? `<div class="hd-note">공시 통계(${escapeHtml(lastSnap.source_kind === "twelvedata" ? "Twelve Data" : lastSnap.source_kind)}, ${lastSnap.asof_date}): PER ${fmtX(lastSnap.per_ratio)} · PBR ${fmtX(lastSnap.pbr_ratio)} · ROE ${fmtRate(lastSnap.roe_rate)}${lastSnap.dividend_yield_rate ? ` · 배당수익률 ${fmtRate(lastSnap.dividend_yield_rate)}` : ""}</div>`
+      : "";
+    const histLine =
+      snaps.length > 1
+        ? `<div class="hd-note">공시 통계 기록: ${snaps.map((e) => `${e.asof_date.slice(2)} PER ${fmtX(e.per_ratio)}`).join(" → ")}</div>`
+        : "";
+    const rows = list
+      .slice(-6)
+      .reverse()
+      .map(
+        (s) => `<tr><td>${s.fiscal_year}</td><td>${fmtBig(s.sales_amount, market)}</td><td>${fmtBig(s.operating_profit_amount, market)}</td><td>${fmtBig(s.net_income_amount, market)}</td><td>${fmtBig(s.total_assets_amount, market)}</td><td>${fmtBig(s.total_liabilities_amount, market)}</td><td>${fmtBig(s.total_equity_amount, market)}</td>
+          <td><button type="button" class="gl-btn" data-action="fund-del-year" data-key="${keyAttr}" data-year="${s.fiscal_year}" aria-label="${s.fiscal_year}년 삭제" title="${s.fiscal_year}년 삭제">×</button></td></tr>`
+      )
+      .join("");
+    body = `<div class="fund-tiles">${tiles}</div>${valueLine}${snapLine}${histLine}
+      <div class="fund-table-wrap"><table class="fund-table"><thead><tr><th>연도</th><th>매출</th><th>영업이익</th><th>순이익</th><th>자산</th><th>부채</th><th>자본</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
+      ${fundBarsHtml(list.slice(-6))}
+      <div class="hd-note">출처: ${list.map((s) => s.fiscal_year + " " + ({ twelvedata: "Twelve Data", datagokr: "공공데이터포털", manual: "직접 입력", csv: "CSV" }[s.source_kind] || s.source_kind)).slice(-6).join(", ")}</div>`;
+  }
+
+  const units = FUND_UNITS[market].map(([label, mult], i) => `<option value="${mult}" ${i === 0 ? "selected" : ""}>${label}</option>`).join("");
+  const field = (name, label) => `<label>${label}<input type="number" step="any" data-fund-field="${name}" /></label>`;
+  const form = `<details class="help fund-form" data-key="${keyAttr}"><summary>직접 입력 (연도별)</summary>
+    <div class="fund-form-grid">
+      <label>결산 연도<input type="number" step="1" min="1900" max="2200" data-fund-field="fiscal_year" placeholder="예: ${new Date().getFullYear() - 1}" /></label>
+      <label>금액 단위<select data-fund-unit>${units}</select></label>
+      ${field("sales_amount", "매출액")}${field("operating_profit_amount", "영업이익")}${field("net_income_amount", "순이익")}
+      ${field("total_assets_amount", "자산총계")}${field("total_liabilities_amount", "부채총계")}${field("total_equity_amount", "자본총계")}
+      <label>발행 주식 수(주)<input type="number" step="1" data-fund-field="shares_count" /></label>
+    </div>
+    <button type="button" class="fetch-btn" data-action="fund-save" data-key="${keyAttr}">저장</button>
+    <span class="hd-note fund-form-status"></span>
+    <div class="hd-note">같은 연도를 다시 저장하면 입력한 칸만 덮어씁니다. 칸을 비우면 기존 값은 그대로입니다.</div></details>`;
+  return `<div class="hd-section fund-section">
+    <div class="hd-title">기업 브리핑 ${glossaryBtn("fundamentals")} <span class="hd-note">결산 재무 · 참고용</span> ${fetchBtn}</div>
+    <div class="fund-status hd-note" data-key="${keyAttr}"></div>
+    ${body}${form}
+  </div>`;
+}
+
+// ----- 미국: Twelve Data 에서 받기 -----
+async function fetchTwelveDataJson(path, symbol, apiKey) {
+  const params = new URLSearchParams({ symbol, apikey: apiKey });
+  const res = await fetch(`https://api.twelvedata.com/${path}?${params.toString()}`);
+  const data = await res.json();
+  if (data.status === "error" || data.code) throw rateLimitAwareError(data, "기업 정보 조회에 실패했습니다.");
+  return data;
+}
+
+// 한 미국 종목의 손익·재무상태·통계를 받아 저장한다. 하나라도 받으면 성공이고, 못 받은 것은 사유를 모아 돌려준다.
+async function fetchFundamentalsOne(stockName) {
+  const key = holdingKey("us", stockName);
+  const symbol = loadSymbols()[key];
+  if (!symbol) return { ok: false, message: "시세 코드가 없습니다" };
+  const apiKey = loadApiKey();
+  if (!apiKey) return { ok: false, message: "Twelve Data API 키가 설정에 없습니다" };
+  const got = {};
+  const problems = [];
+  for (const [i, [name, path]] of [["income", "income_statement"], ["balance", "balance_sheet"], ["stats", "statistics"]].entries()) {
+    if (i > 0) await sleep(REFRESH_GAP_MS.us);
+    const run = () => fetchTwelveDataJson(path, symbol, apiKey);
+    try {
+      try {
+        got[name] = await run();
+      } catch (e) {
+        if (!e.rate_limited) throw e;
+        await waitWithCountdown(RATE_LIMIT_WAIT_MS, (sec) => `분당 한도에 걸려 ${sec}초 기다린 뒤 ${stockName} ${path}를 다시 조회합니다`);
+        got[name] = await run();
+      }
+    } catch (e) {
+      problems.push(`${path}: ${e.message}`);
+    }
+  }
+  const parsed = Fundamentals.parseTwelveData(got.income || null, got.balance || null, got.stats || null, new Date().toISOString());
+  if (parsed.summaries.length === 0 && !parsed.valuation) {
+    const plan = problems.some((p) => /plan|upgrade|grow|pro|available|subscription|403/i.test(p)) ? " (무료 플랜에서는 제공되지 않는 항목일 수 있습니다. 직접 입력·CSV로 넣을 수 있습니다)" : "";
+    return { ok: false, message: (problems[0] || "받은 정보가 없습니다") + plan };
+  }
+  let map = loadFundamentals();
+  let added = 0;
+  parsed.summaries.forEach((s) => {
+    const r = Fundamentals.upsertYear(map, key, s);
+    map = r.map;
+    if (r.added) added++;
+  });
+  saveFundamentals(map);
+  if (parsed.valuation) saveValuations(Fundamentals.appendValuation(loadValuations(), key, parsed.valuation));
+  return { ok: true, years: parsed.summaries.length, added, problems };
+}
+
+let fundamentalsRunning = false;
+async function fetchFundamentalsAllUS() {
+  const symbols = loadSymbols();
+  const fund = loadFundamentals();
+  const recently = (key) => {
+    const latest = Fundamentals.latestSummary(fund, key);
+    return latest && latest.collected_at && Date.now() - Date.parse(latest.collected_at) < 30 * 24 * 3600 * 1000 && latest.source_kind === "twelvedata";
+  };
+  const targets = computeHoldings(loadTransactions()).filter((h) => h.market_kind === "us" && symbols[holdingKey("us", h.stock_name)] && !recently(holdingKey("us", h.stock_name)));
+  const failed = [];
+  let filled = 0;
+  for (let i = 0; i < targets.length; i++) {
+    setFundManageStatus(`기업 정보 받는 중... (${i + 1}/${targets.length}) ${targets[i].stock_name}`);
+    const result = await fetchFundamentalsOne(targets[i].stock_name);
+    if (result.ok) filled++;
+    else failed.push(`${targets[i].stock_name}: ${result.message}`);
+    if (i < targets.length - 1) await sleep(REFRESH_GAP_MS.us);
+  }
+  return { target_cnt: targets.length, filled, failed };
+}
+
+function setFundManageStatus(text) {
+  const el = document.getElementById("fund-manage-status");
+  if (el) el.textContent = text;
+}
+
+function buildFundamentalsCsv(map, holdings) {
+  const keys = new Set([...Object.keys(map), ...holdings.map((h) => holdingKey(h.market_kind, h.stock_name))]);
+  const sorted = [...keys].filter((k) => Fundamentals.yearsOf(map, k).length > 0).sort((a, b) => (a.slice(0, 2) === b.slice(0, 2) ? a.localeCompare(b, "ko") : a < b ? -1 : 1));
+  return Fundamentals.toCsvRows(map, sorted)
+    .map((cols) => cols.map(csvEscape).join(","))
+    .join("\r\n");
+}
+
+async function handleFundamentalsCsvImportFile(file) {
+  const BOM = String.fromCharCode(0xfeff);
+  const text = (await file.text()).replace(new RegExp("^" + BOM), "");
+  const rows = parseCsv(text);
+  if (rows.length <= 1) {
+    setFundManageStatus("가져올 내용이 없습니다 (빈 파일이거나 머리글만 있음).");
+    return;
+  }
+  const { items, errors } = Fundamentals.fromCsvRows(rows.slice(1), new Date().toISOString());
+  let map = loadFundamentals();
+  let added = 0;
+  items.forEach(({ key, summary }) => {
+    const r = Fundamentals.upsertYear(map, key, summary);
+    map = r.map;
+    if (r.added) added++;
+  });
+  saveFundamentals(map);
+  render();
+  setFundManageStatus(
+    `${items.length}줄 적용 (새 연도 ${added}건)` + (errors.length > 0 ? ` · ${errors.length}줄 건너뜀 (${errors.slice(0, 5).join(", ")}${errors.length > 5 ? " 외" : ""})` : "")
+  );
+}
+
+function setupFundamentals() {
+  const area = document.getElementById("holdings-area");
+  const statusOf = (key) => [...document.querySelectorAll(".fund-status")].find((e) => e.dataset.key === key);
+
+  area.addEventListener("click", async (event) => {
+    const fetchBtn = event.target.closest('[data-action="fund-fetch"]');
+    if (fetchBtn) {
+      const key = fetchBtn.dataset.key;
+      const { stock_name } = splitHoldingKey(key);
+      const status = statusOf(key);
+      if (status) status.textContent = "기업 정보를 받는 중... (손익·재무상태·통계 3번 조회, 약 20초)";
+      fetchBtn.disabled = true;
+      const result = await fetchFundamentalsOne(stock_name);
+      openHoldingKeys.add(key);
+      render();
+      const after = statusOf(key);
+      if (after) {
+        after.textContent = result.ok
+          ? `기업 정보 ${result.years}개 연도를 받았습니다 (새 연도 ${result.added}건)${result.problems.length ? ` · 일부 실패: ${result.problems[0]}` : ""}`
+          : `받지 못했습니다: ${result.message}`;
+      }
+      return;
+    }
+    const saveBtn = event.target.closest('[data-action="fund-save"]');
+    if (saveBtn) {
+      const key = saveBtn.dataset.key;
+      const form = saveBtn.closest(".fund-form");
+      const market = splitHoldingKey(key).market_kind;
+      const mult = Number(form.querySelector("[data-fund-unit]").value) || 1;
+      const raw = { source_kind: "manual", collected_at: new Date().toISOString(), currency_kind: market === "us" ? "USD" : "KRW" };
+      form.querySelectorAll("[data-fund-field]").forEach((input) => {
+        const name = input.dataset.fundField;
+        if (input.value.trim() === "") return;
+        const v = Number(input.value);
+        raw[name] = name === "fiscal_year" || name === "shares_count" ? v : v * mult;
+      });
+      const status = form.querySelector(".fund-form-status");
+      const filled = Fundamentals.AMOUNT_FIELDS.filter((f) => raw[f] !== undefined);
+      if (!Fundamentals.normalizeSummary({ fiscal_year: raw.fiscal_year })) {
+        status.textContent = "결산 연도를 4자리로 입력해 주세요.";
+        return;
+      }
+      if (filled.length === 0) {
+        status.textContent = "금액을 하나 이상 입력해 주세요.";
+        return;
+      }
+      const r = Fundamentals.upsertYear(loadFundamentals(), key, raw);
+      saveFundamentals(r.map);
+      openHoldingKeys.add(key);
+      render();
+      const after = statusOf(key);
+      if (after) after.textContent = `${raw.fiscal_year}년 ${r.added ? "추가" : "갱신"}했습니다.`;
+      return;
+    }
+    const delBtn = event.target.closest('[data-action="fund-del-year"]');
+    if (delBtn) {
+      const key = delBtn.dataset.key;
+      const year = delBtn.dataset.year;
+      if (!window.confirm(`${splitHoldingKey(key).stock_name}의 ${year}년 재무 기록을 삭제할까요?`)) return;
+      const map = loadFundamentals();
+      if (map[key]) {
+        delete map[key][year];
+        if (Object.keys(map[key]).length === 0) delete map[key];
+        saveFundamentals(map);
+      }
+      render();
+    }
+  });
+
+  document.getElementById("fund-fetch-all-btn").addEventListener("click", async () => {
+    if (fundamentalsRunning) return;
+    fundamentalsRunning = true;
+    const btn = document.getElementById("fund-fetch-all-btn");
+    btn.disabled = true;
+    try {
+      const r = await fetchFundamentalsAllUS();
+      render();
+      const shown = r.failed.slice(0, 2).join(", ") + (r.failed.length > 2 ? ` 외 ${r.failed.length - 2}개` : "");
+      setFundManageStatus(
+        r.target_cnt === 0
+          ? "받을 미국 종목이 없습니다 (시세 코드가 없거나 최근 30일 안에 받은 종목은 건너뜁니다)."
+          : `기업 정보 ${r.filled}종목 받음` + (r.failed.length > 0 ? ` · 실패 ${r.failed.length}개 (${shown})` : "")
+      );
+    } finally {
+      fundamentalsRunning = false;
+      btn.disabled = false;
+    }
+  });
+  document.getElementById("fund-export-csv-btn").addEventListener("click", () => {
+    const csv = buildFundamentalsCsv(loadFundamentals(), computeHoldings(loadTransactions()));
+    downloadTextFile(`기업재무_${todayISO()}.csv`, String.fromCharCode(0xfeff) + csv, "text/csv;charset=utf-8");
+    setFundManageStatus("기업 재무 CSV 파일을 내보냈습니다.");
+  });
+  const fileInput = document.getElementById("fund-import-csv-file");
+  document.getElementById("fund-import-csv-btn").addEventListener("click", () => fileInput.click());
+  fileInput.addEventListener("change", async () => {
+    const file = fileInput.files[0];
+    if (!file) return;
+    await handleFundamentalsCsvImportFile(file);
+    fileInput.value = "";
+  });
+}
+// ===== 기업 현황 브리핑 END =====
 
 // ===== 시세 시그널·투자 성격·용어집 (design/11_시그널과용어집.md) =====
 // 계산은 js/signals.js(Signals)와 js/glossary.js(Glossary)가 하고, 여기서는 저장·화면·이벤트만 이어 준다.
@@ -3487,6 +3846,8 @@ function collectBackupData() {
     alert_settings: loadAlertSettings(),
     signal_state_map: loadSignalMap(),
     signal_settings: loadSignalSettings(),
+    fundamentals_map: loadFundamentals(),
+    valuation_history_map: loadValuations(),
     us_price_api_key: loadApiKey(),
     kr_price_api_key: loadKrApiKey(),
   };
@@ -3525,6 +3886,8 @@ async function handleJsonImportFile(file) {
   if (data.alert_settings && typeof data.alert_settings === "object") saveAlertSettings(data.alert_settings);
   if (data.signal_state_map && typeof data.signal_state_map === "object") saveSignalMap(data.signal_state_map);
   if (data.signal_settings && typeof data.signal_settings === "object") saveSignalSettings(data.signal_settings);
+  if (data.fundamentals_map && typeof data.fundamentals_map === "object") saveFundamentals(data.fundamentals_map);
+  if (data.valuation_history_map && typeof data.valuation_history_map === "object") saveValuations(data.valuation_history_map);
   if (typeof data.us_price_api_key === "string") saveApiKey(data.us_price_api_key);
   if (typeof data.kr_price_api_key === "string") saveKrApiKey(data.kr_price_api_key);
 
@@ -3798,6 +4161,7 @@ setupAlertActions();
 setupAlertSettings();
 setupSignalActions();
 setupSignalSettings();
+setupFundamentals();
 setupGlossary();
 setupRefreshAll();
 setupBulkSymbols();
