@@ -113,6 +113,15 @@
     return { peak_close: peak, atr, stop_line: peak - atrMultiple * atr };
   }
 
+  /** 날짜별 단순 이동평균(그래프용). n 거래일이 모이는 날부터 시작한다. @returns {{price_date:string, value:number}[]} */
+  function smaSeries(history, n) {
+    const rows = cleanRows(history);
+    const closes = rows.map((e) => e.close_price);
+    const out = [];
+    for (let i = n - 1; i < rows.length; i++) out.push({ price_date: rows[i].price_date, value: sma(closes, n, i) });
+    return out;
+  }
+
   /**
    * 날짜별 추적 손절선(그래프용). 각 날짜의 선 = 그날까지 최근 lookback 거래일 최고 종가 - 배수 × 그날의 ATR.
    * ATR 을 구할 수 없는 앞부분은 건너뛴다. 마지막 값은 trailingStop() 의 stop_line 과 같다.
@@ -265,6 +274,7 @@
     findCross,
     trailingStop,
     trailingStopSeries,
+    smaSeries,
     rangePosition,
     computeSignal,
     evaluateSignals,

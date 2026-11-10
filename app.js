@@ -1088,7 +1088,34 @@ function sectorOptionsHtml(choices, current) {
 }
 
 // 가격 추이 차트(SVG). 종가 선 + 내 평균단가 점선. 기록이 2일 미만이면 안내만 돌려준다.
-function priceChartHtml(entries, averagePrice, marketKind, trail = []) {
+// 그래프에 겹쳐 그릴 이동평균선: 단기·장기(설정의 기간)와 120일선. 색은 고정.
+const CHART_MA_COLORS = { short: "#34d399", long: "#a78bfa", extra: "#f472b6" };
+const CHART_LAYERS_KEY = "stockChartLayers_v1"; // chart_layer_list: 그래프에 켜 둔 이동평균선 (화면 설정이라 백업 대상 아님)
+const chartLayersOn = (() => {
+  try {
+    const saved = JSON.parse(localStorage.getItem(CHART_LAYERS_KEY) || "null");
+    if (Array.isArray(saved)) return new Set(saved);
+  } catch (e) {
+    // 저장값을 못 읽으면 기본값으로
+  }
+  return new Set(["short", "long"]);
+})();
+function saveChartLayers() {
+  try {
+    localStorage.setItem(CHART_LAYERS_KEY, JSON.stringify([...chartLayersOn]));
+  } catch (e) {
+    // 저장소를 못 쓰면 기억만 건너뛴다
+  }
+}
+function chartMaSpecs(settings) {
+  return [
+    { id: "short", period: settings.sma_short_period },
+    { id: "long", period: settings.sma_long_period },
+    { id: "extra", period: 120 },
+  ].map((m) => ({ ...m, color: CHART_MA_COLORS[m.id] }));
+}
+
+function priceChartHtml(entries, averagePrice, marketKind, trail = [], maLines = [], maToggleHtml = "") {
   const rows = [...entries].filter((e) => Number.isFinite(e.close_price)).sort((a, b) => (a.price_date < b.price_date ? -1 : 1)).slice(-250);
   if (rows.length < 2) {
     return `<div class="hd-note">저장된 시세가 ${rows.length}일뿐입니다. '과거 시세 채우기'를 눌러 주세요.</div>`;
@@ -1102,10 +1129,12 @@ function priceChartHtml(entries, averagePrice, marketKind, trail = []) {
   const t1 = t(rows[rows.length - 1]);
   const firstDate = rows[0].price_date;
   const trailRows = trail.filter((p) => p.price_date >= firstDate && Number.isFinite(p.stop_line) && p.stop_line > 0); // 추세 이탈선(그래프에 같이 그림)
+  const maRows = maLines.map((m) => ({ ...m, points: m.points.filter((p) => p.price_date >= firstDate) })).filter((m) => m.points.length > 1);
   const values = rows
     .map((e) => e.close_price)
     .concat(averagePrice > 0 ? [averagePrice] : [])
-    .concat(trailRows.map((p) => p.stop_line));
+    .concat(trailRows.map((p) => p.stop_line))
+    .concat(maRows.flatMap((m) => m.points.map((p) => p.value)));
   const lo = Math.min(...values);
   const hi = Math.max(...values);
   const span = hi - lo || 1;
@@ -1125,6 +1154,12 @@ function priceChartHtml(entries, averagePrice, marketKind, trail = []) {
     ? `<path class="pc-trail" d="${trailPath}" fill="none" stroke="#fb923c" stroke-width="1.2" stroke-dasharray="1.5 2" />` +
       (broken ? `<circle class="pc-trail-break" cx="${x(rows[rows.length - 1]).toFixed(1)}" cy="${y(last).toFixed(1)}" r="3" fill="#fb923c" />` : "")
     : "";
+  const maSvg = maRows
+    .map(
+      (m) =>
+        `<path class="pc-ma pc-ma-${m.period}" d="${m.points.map((p, i) => `${i === 0 ? "M" : "L"}${x(p).toFixed(1)},${y(p.value).toFixed(1)}`).join(" ")}" fill="none" stroke="${m.color}" stroke-width="1" />`
+    )
+    .join("");
   const avgLine =
     averagePrice > 0
       ? `<line class="pc-avg" x1="${PADX}" x2="${W - PADX}" y1="${y(averagePrice).toFixed(1)}" y2="${y(averagePrice).toFixed(1)}" stroke="#facc15" stroke-width="1" stroke-dasharray="4 3" />`
@@ -1132,6 +1167,7 @@ function priceChartHtml(entries, averagePrice, marketKind, trail = []) {
   return `
     <svg class="price-chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="종가 추이">
       ${avgLine}
+      ${maSvg}
       ${trailSvg}
       <path class="pc-line" d="${path}" fill="none" stroke="${color}" stroke-width="1.6" />
     </svg>
@@ -1141,8 +1177,10 @@ function priceChartHtml(entries, averagePrice, marketKind, trail = []) {
       <span>${rows[0].price_date} ~ ${rows[rows.length - 1].price_date} (${rows.length}일)</span>
       <span class="${profitClass(change)}">기간 시세 변화 ${formatPercent(change)}</span>
       ${averagePrice > 0 ? '<span class="pc-avg-note">노란 점선: 내 평균단가</span>' : ""}
+      ${maRows.map((m) => `<span style="color:${m.color}">${m.period}일선 ${Math.round(m.points[m.points.length - 1].value).toLocaleString("ko-KR")}</span>`).join("")}
       ${trailPath ? `<span class="pc-trail-note">주황 점선: 추세 이탈선 ${glossaryBtn("trend_break")} (그날까지 최근 고점 − ATR×배수)${broken ? " · 현재가가 선 아래 ●" : ""}</span>` : ""}
-    </div>`;
+    </div>
+    ${maToggleHtml}`;
 }
 
 // 종목 한 줄에 넣는 시세 미니 그래프(최근 60일 종가 선)와 전일비. 시세가 2일 미만이면 둘 다 비어 있다.
@@ -1253,7 +1291,7 @@ function holdingRowHtml(r, ctx) {
           <div class="hd-title">가격 추이 <span class="hd-note">(저장된 시세 ${(ctx.historyByKey[r.key] || []).length}일)</span>
             <button type="button" class="fetch-btn" data-action="backfill-one" data-key="${key}">과거 시세 채우기</button>
           </div>
-          ${priceChartHtml(ctx.historyByKey[r.key] || [], r.h.average_price, market, Signals.trailingStopSeries(ctx.historyByKey[r.key] || [], ctx.signalSettings.trail_lookback_days, ctx.signalSettings.trail_atr_multiple, ctx.atrPeriod))}
+          ${priceChartHtml(ctx.historyByKey[r.key] || [], r.h.average_price, market, Signals.trailingStopSeries(ctx.historyByKey[r.key] || [], ctx.signalSettings.trail_lookback_days, ctx.signalSettings.trail_atr_multiple, ctx.atrPeriod), chartMaSpecs(ctx.signalSettings).filter((m) => chartLayersOn.has(m.id)).map((m) => ({ ...m, points: Signals.smaSeries(ctx.historyByKey[r.key] || [], m.period) })), maToggleHtml(ctx.signalSettings))}
         </div>
         <div class="hd-section">
           <div class="hd-title">배당 ${div.count}건${div.count > 0 ? ` · 합계 ${formatMoney(div.total, market)}` : ""}</div>
@@ -1938,6 +1976,12 @@ function signalSectionHtml(r, ctx) {
       ${rg ? `<span>52주 위치 ${glossaryBtn("range_52w")} ${(rg.position_rate * 100).toFixed(0)}%</span><span>고점 대비 ${glossaryBtn("drawdown")} ${formatPercent(rg.drawdown_rate)}</span>` : ""}
     </div>`);
   }
+  if (sig.signal_state !== "insufficient" && sig.metrics.sma_short !== null && sig.metrics.sma_long !== null) {
+    const up = sig.metrics.sma_short > sig.metrics.sma_long;
+    lines.push(
+      `<div class="hd-note">${settings.sma_short_period}일선이 ${settings.sma_long_period}일선 ${up ? "위" : "아래"}에 있어 ${up ? "상승" : "하락"} 흐름(${up ? "정배열" : "역배열"}) ${glossaryBtn("ma_alignment")}입니다. 현재가는 ${settings.sma_long_period}일선 ${sig.metrics.current_price >= sig.metrics.sma_long ? "위" : "아래"}입니다.</div>`
+    );
+  }
   const w = ctx.weightOver && ctx.weightOver.over[r.key];
   if (w) {
     lines.push(
@@ -1964,7 +2008,28 @@ function styleRowHtml(r) {
   </div>`;
 }
 
+// 그래프 아래의 이동평균선 켜기·끄기 버튼
+function maToggleHtml(settings) {
+  const chips = chartMaSpecs(settings)
+    .map(
+      (m) =>
+        `<button type="button" class="chip pc-ma-chip ${chartLayersOn.has(m.id) ? "active" : ""}" data-action="chart-ma" data-layer="${m.id}" style="border-color:${m.color}">${m.period}일선</button>`
+    )
+    .join("");
+  return `<div class="pc-toggles"><span class="hd-note">이동평균선 ${glossaryBtn("sma")}</span>${chips}
+    <span class="hd-note">단기선이 장기선 아래면 하락 흐름 ${glossaryBtn("ma_alignment")}</span></div>`;
+}
+
 function setupSignalActions() {
+  document.getElementById("holdings-area").addEventListener("click", (event) => {
+    const chip = event.target.closest('[data-action="chart-ma"]');
+    if (!chip) return;
+    const id = chip.dataset.layer;
+    if (chartLayersOn.has(id)) chartLayersOn.delete(id);
+    else chartLayersOn.add(id);
+    saveChartLayers();
+    renderHoldingsOnly();
+  });
   document.getElementById("holdings-area").addEventListener("change", (event) => {
     const sel = event.target.closest('[data-action="style-select"]');
     if (!sel) return;
