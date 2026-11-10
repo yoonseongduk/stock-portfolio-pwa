@@ -1338,7 +1338,20 @@ function renderHoldingsToolbar(allRows, shownCount) {
   sel.value = v.sector_filter;
   const q = document.getElementById("hv-query");
   if (q.value !== v.search_text) q.value = v.search_text;
-  document.getElementById("hv-count").textContent = `표시 ${shownCount} / 전체 ${allRows.length}종목`;
+  // 켜져 있는 필터를 눈에 띄게 알리고 한 번에 풀 수 있게 한다(표시 수가 전체보다 적은 이유를 바로 알 수 있게)
+  const SIGNAL_FILTER_LABEL = { buy_watch: "시그널=매수 관심", sell_review: "시그널=매도 검토" };
+  const active = [];
+  if (v.market_filter !== "all") active.push(v.market_filter === "kr" ? "국장" : "미장");
+  if (v.market_filter === "kr" && v.exchange_filter !== "all") active.push({ kospi: "코스피", kosdaq: "코스닥", unknown: "거래소 미분류" }[v.exchange_filter] || v.exchange_filter);
+  if (v.sector_filter !== "all") active.push(v.sector_filter === "__none" ? "섹터 미분류" : `섹터=${v.sector_filter}`);
+  if (v.signal_filter !== "all") active.push(SIGNAL_FILTER_LABEL[v.signal_filter]);
+  if (v.search_text.trim()) active.push(`검색="${v.search_text.trim()}"`);
+  const countEl = document.getElementById("hv-count");
+  countEl.innerHTML =
+    `표시 ${shownCount} / 전체 ${allRows.length}종목` +
+    (active.length > 0
+      ? ` · <strong class="hv-active">필터 적용 중: ${active.map(escapeHtml).join(", ")}</strong> <button type="button" class="fetch-btn" data-action="hv-reset">필터 모두 해제</button>`
+      : "");
 }
 
 function renderHoldings(holdings, prices, symbols, info = {}, transactions = [], dividends = []) {
@@ -1731,6 +1744,12 @@ function renderHoldingsOnly() {
 
 function setupHoldingsView() {
   const toolbar = document.getElementById("holdings-toolbar");
+  toolbar.addEventListener("click", (event) => {
+    if (!event.target.closest('[data-action="hv-reset"]')) return;
+    holdingsView = { ...holdingsView, market_filter: "all", exchange_filter: "all", sector_filter: "all", signal_filter: "all", search_text: "" };
+    saveHoldingsView();
+    renderHoldingsOnly();
+  });
   toolbar.addEventListener("click", (event) => {
     const chip = event.target.closest(".chip");
     if (!chip) return;
