@@ -165,6 +165,99 @@
     return { summaries, valuation };
   }
 
+  // ----- 국내: 공공데이터포털 금융위원회 기업기본정보·기업재무정보 -----
+  // 응답 필드 이름은 공식 문서 페이지에 없어 알려진 이름을 우선으로 하되, 못 찾으면 받은 필드 이름을 사유에 담는다.
+  const KR_FIELDS = {
+    year: ["bizYear"],
+    sales: ["enpSaleAmt"],
+    operating: ["enpBzopPft"],
+    net: ["enpCrtmNpf"],
+    assets: ["enpTastAmt"],
+    liabilities: ["enpTdbtAmt"],
+    equity: ["enpTcptAmt"],
+  };
+  const pick = (item, names) => {
+    for (const n of names) {
+      if (item && item[n] !== undefined && item[n] !== null && item[n] !== "") {
+        const v = Number(String(item[n]).replace(/,/g, ""));
+        if (Number.isFinite(v)) return v;
+      }
+    }
+    return undefined;
+  };
+
+  /**
+   * 요약재무제표 조회 결과(여러 연도·연결/별도가 섞여 있을 수 있음)를 연도별 묶음으로 바꾼다.
+   * 같은 연도에 연결재무제표가 있으면 연결을, 없으면 그 밖의 첫 값을 쓴다.
+   * @returns {{summaries:object[], missing:string[], seen_fields:string[]}}
+   */
+  function parseDataGoKrSummary(items, nowIso) {
+    const list = Array.isArray(items) ? items : [];
+    const seen = new Set();
+    const byYear = new Map();
+    for (const it of list) {
+      Object.keys(it || {}).forEach((k) => seen.add(k));
+      const year = pick(it, KR_FIELDS.year);
+      if (!Number.isInteger(year)) continue;
+      const name = String(it.fnclDcdNm || it.fnclDcd || "");
+      const consolidated = name.includes("연결");
+      const before = byYear.get(year);
+      if (!before || (consolidated && !before.consolidated)) byYear.set(year, { item: it, consolidated, name });
+    }
+    const summaries = [];
+    for (const [year, { item, consolidated, name }] of byYear) {
+      const s = normalizeSummary({
+        fiscal_year: year,
+        sales_amount: pick(item, KR_FIELDS.sales),
+        operating_profit_amount: pick(item, KR_FIELDS.operating),
+        net_income_amount: pick(item, KR_FIELDS.net),
+        total_assets_amount: pick(item, KR_FIELDS.assets),
+        total_liabilities_amount: pick(item, KR_FIELDS.liabilities),
+        total_equity_amount: pick(item, KR_FIELDS.equity),
+        statement_kind: consolidated ? "consolidated" : name ? "separate" : "unknown",
+        currency_kind: "KRW",
+        source_kind: "datagokr",
+        collected_at: nowIso,
+      });
+      if (s && AMOUNT_FIELDS.some((f) => s[f] !== undefined)) summaries.push(s);
+    }
+    summaries.sort((a, b) => a.fiscal_year - b.fiscal_year);
+    const missing = list.length > 0 && summaries.length === 0 ? Object.values(KR_FIELDS).map((n) => n[0]).filter((n) => !seen.has(n)) : [];
+    return { summaries, missing, seen_fields: [...seen] };
+  }
+
+  /** 법인명 비교용: 괄호 안·(주)·주식회사·공백을 없애고 소문자로. */
+  function normalizeCorpName(name) {
+    return String(name || "")
+      .replace(/\(주\)|㈜|주식회사/g, "")
+      .replace(/\s+/g, "")
+      .toLowerCase();
+  }
+
+  /** 종목명에서 우선주 표기('우', '우B', '2우B')를 뗀 보통주 이름 후보. */
+  function commonStockName(stockName) {
+    return String(stockName || "").replace(/\s*\d?우[A-C]?$/, "");
+  }
+
+  /**
+   * 기업기본정보 조회 결과에서 종목명과 같은 법인을 고른다.
+   * @returns {{status:'one'|'many'|'none', crno?:string, corp_name?:string, candidates:{crno:string, corp_name:string}[]}}
+   */
+  function pickCorpMatch(items, stockName) {
+    const targets = [normalizeCorpName(stockName), normalizeCorpName(commonStockName(stockName))];
+    const all = (Array.isArray(items) ? items : [])
+      .filter((it) => it && it.crno && it.corpNm)
+      .map((it) => ({ crno: String(it.crno), corp_name: String(it.corpNm), listed: ["Y", "K", "N"].includes(String(it.corpRegMrktDcd || "")) || String(it.enpPbanYn || "") === "Y" }));
+    const same = all.filter((c) => targets.includes(normalizeCorpName(c.corp_name)));
+    const pool = same.length > 0 ? same : [];
+    const listed = pool.filter((c) => c.listed);
+    const use = listed.length > 0 ? listed : pool;
+    const uniq = [...new Map(use.map((c) => [c.crno, c])).values()];
+    if (uniq.length === 1) return { status: "one", crno: uniq[0].crno, corp_name: uniq[0].corp_name, candidates: uniq };
+    if (uniq.length > 1) return { status: "many", candidates: uniq };
+    return { status: "none", candidates: all.slice(0, 5).map(({ crno, corp_name }) => ({ crno, corp_name })) };
+  }
+
   /**
    * 가치 지표 스냅샷을 history 에 넣는다(같은 날짜는 덮어쓰고 날짜순 정렬). 공식 수치 기록용.
    * @param {Record<string, object[]>} historyMap holding_key -> 스냅샷 목록
@@ -255,6 +348,10 @@
     deriveMetrics,
     computeValuation,
     parseTwelveData,
+    parseDataGoKrSummary,
+    normalizeCorpName,
+    commonStockName,
+    pickCorpMatch,
     appendValuation,
     formatBigAmount,
     toCsvRows,

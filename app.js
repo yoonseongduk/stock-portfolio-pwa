@@ -456,6 +456,7 @@ async function fetchPriceDataGoKr(apiKey, symbol) {
     low_price: Number(latest.lopr),
     trade_volume: Number(latest.trqu),
     exchange_kind: normalizeExchangeKind(latest.mrktCtg),
+    listed_shares: Number(latest.lstgStCnt), // 상장 주식 수(PER·PBR 계산용, 기업 브리핑)
   };
 }
 
@@ -651,7 +652,7 @@ async function fetchAndUpdatePrice(marketKind, stockName) {
   if (!symbol) return { ok: false, message: "시세 코드가 없습니다" };
 
   try {
-    const { current_price, price_date, open_price, high_price, low_price, trade_volume, exchange_kind } = await fetchCurrentPrice(
+    const { current_price, price_date, open_price, high_price, low_price, trade_volume, exchange_kind, listed_shares } = await fetchCurrentPrice(
       marketKind,
       symbol
     );
@@ -660,6 +661,7 @@ async function fetchAndUpdatePrice(marketKind, stockName) {
     savePrices(prices);
     appendPriceHistory(key, price_date, { open_price, high_price, low_price, close_price: current_price, trade_volume });
     if (exchange_kind) updateStockInfo(key, { exchange_kind }, { onlyIfEmpty: true }); // 거래소가 비어 있을 때만 자동으로 채운다
+    if (Number.isFinite(listed_shares) && listed_shares > 0) saveListedShare(key, listed_shares, price_date);
     return { ok: true, current_price, price_date };
   } catch (e) {
     // 분당 한도 오류는 영어 원문이 길어서 짧은 한글로 바꿔 보여 준다.
@@ -1430,7 +1432,7 @@ function renderHoldings(holdings, prices, symbols, info = {}, transactions = [],
   const sectorChoices = [...new Set([...DEFAULT_SECTORS, ...allRows.map((r) => r.sector_name).filter(Boolean)])].sort((a, b) =>
     a.localeCompare(b, "ko")
   );
-  const ctx = { marketTotals, tradesByKey, dividendByKey, sectorChoices, historyByKey: historyMap, signalSettings, atrPeriod, alertRules: loadAlertRules(), weightOver: computeWeightOver(allRows), fundMap: loadFundamentals(), valHistory: loadValuations() };
+  const ctx = { marketTotals, tradesByKey, dividendByKey, sectorChoices, historyByKey: historyMap, signalSettings, atrPeriod, alertRules: loadAlertRules(), weightOver: computeWeightOver(allRows), fundMap: loadFundamentals(), valHistory: loadValuations(), sharesMap: loadListedShares(), corpIds: loadCorpIds() };
 
   const groups = groupHoldingRows(rows, holdingsView);
   const sectorOptions = [...new Set(allRows.map((r) => r.sector_name).filter(Boolean))]
@@ -1942,6 +1944,32 @@ function loadFundamentals() {
 function saveFundamentals(map) {
   localStorage.setItem(FUNDAMENTALS_KEY, JSON.stringify(map));
 }
+const SHARES_KEY = "stockListedShares_v2"; // listed_shares_map: holding_key -> {shares_count, asof_date} (국내 시세 응답의 상장 주식 수)
+const CORP_IDS_KEY = "stockCorpIds_v2"; // corp_id_map: holding_key -> {crno, corp_name} (국내 법인등록번호, 기업재무정보 조회용)
+function loadListedShares() {
+  try {
+    const map = JSON.parse(localStorage.getItem(SHARES_KEY) || "{}");
+    return map && typeof map === "object" ? map : {};
+  } catch (e) {
+    return {};
+  }
+}
+function saveListedShare(key, shares, asof) {
+  const map = loadListedShares();
+  map[key] = { shares_count: shares, asof_date: asof };
+  localStorage.setItem(SHARES_KEY, JSON.stringify(map));
+}
+function loadCorpIds() {
+  try {
+    const map = JSON.parse(localStorage.getItem(CORP_IDS_KEY) || "{}");
+    return map && typeof map === "object" ? map : {};
+  } catch (e) {
+    return {};
+  }
+}
+function saveCorpIds(map) {
+  localStorage.setItem(CORP_IDS_KEY, JSON.stringify(map));
+}
 function loadValuations() {
   try {
     const raw = localStorage.getItem(VALUATIONS_KEY);
@@ -2000,18 +2028,19 @@ function fundamentalsSectionHtml(r, ctx) {
   const snaps = (ctx.valHistory[key] || []).slice(-5);
   const lastSnap = snaps.length ? snaps[snaps.length - 1] : null;
   const keyAttr = escapeHtml(key);
-  const fetchBtn =
-    market === "us"
-      ? `<button type="button" class="fetch-btn" data-action="fund-fetch" data-key="${keyAttr}">기업 정보 받기</button>`
-      : '<span class="hd-note">국내는 직접 입력·CSV (자동 수집은 공공데이터포털 기업재무정보 연결 후)</span>';
+  const fetchBtn = `<button type="button" class="fetch-btn" data-action="fund-fetch" data-key="${keyAttr}">기업 정보 받기</button>`;
+  const corp = ctx.corpIds[key];
+  const corpNote = market === "kr" && corp ? `<div class="hd-note">법인: ${escapeHtml(corp.corp_name || "")} · 법인등록번호 ${escapeHtml(corp.crno)}</div>` : "";
+  const listed = ctx.sharesMap[key];
 
   let body;
   if (!latest) {
-    body = `<div class="hd-note">저장된 기업 정보가 없습니다. ${market === "us" ? "'기업 정보 받기'로 가져오거나" : ""} 직접 입력·CSV로 넣을 수 있습니다.</div>`;
+    body = `<div class="hd-note">저장된 기업 정보가 없습니다. '기업 정보 받기'로 가져오거나 직접 입력·CSV로 넣을 수 있습니다.</div>${corpNote}`;
   } else {
     const m = Fundamentals.deriveMetrics(latest);
     const withShares = [...list].reverse().find((s) => Number.isFinite(s.shares_count));
-    const val = Fundamentals.computeValuation(r.currentPrice, withShares ? { ...latest, shares_count: withShares.shares_count } : latest);
+    const sharesNow = listed && Number.isFinite(listed.shares_count) ? listed.shares_count : withShares ? withShares.shares_count : undefined; // 국내는 시세 응답의 상장 주식 수를 우선
+    const val = Fundamentals.computeValuation(r.currentPrice, sharesNow ? { ...latest, shares_count: sharesNow } : latest);
     const tiles = [
       ["매출액", "sales", latest.sales_amount, null],
       ["영업이익", "operating_profit", latest.operating_profit_amount, m.operating_margin_rate === null ? null : `영업이익률 ${fmtRate(m.operating_margin_rate)}`],
@@ -2029,7 +2058,7 @@ function fundamentalsSectionHtml(r, ctx) {
       <span>시가총액 ${glossaryBtn("market_cap")} ${fmtBig(val.market_cap_amount, market)}</span>
       <span>부채비율 ${glossaryBtn("debt_ratio")} ${fmtRate(m.debt_ratio_rate)}</span>
     </div>
-    <div class="hd-note">${latest.fiscal_year}년 결산 기준, 현재가×주식 수로 계산한 값${val.per_ratio === null && val.pbr_ratio === null ? " (주식 수가 없으면 PER·PBR은 계산되지 않습니다. 직접 입력에 주식 수를 넣어 보세요)" : ""}</div>`;
+    <div class="hd-note">${latest.fiscal_year}년 결산 기준, 현재가×주식 수로 계산한 값${val.per_ratio === null && val.pbr_ratio === null ? " (주식 수가 없으면 PER·PBR은 계산되지 않습니다. 국내는 '전체 시세 새로고침' 뒤 자동으로 채워지고, 직접 입력에 주식 수를 넣을 수도 있습니다)" : ""}</div>`;
     const snapLine = lastSnap
       ? `<div class="hd-note">공시 통계(${escapeHtml(lastSnap.source_kind === "twelvedata" ? "Twelve Data" : lastSnap.source_kind)}, ${lastSnap.asof_date}): PER ${fmtX(lastSnap.per_ratio)} · PBR ${fmtX(lastSnap.pbr_ratio)} · ROE ${fmtRate(lastSnap.roe_rate)}${lastSnap.dividend_yield_rate ? ` · 배당수익률 ${fmtRate(lastSnap.dividend_yield_rate)}` : ""}</div>`
       : "";
@@ -2045,7 +2074,7 @@ function fundamentalsSectionHtml(r, ctx) {
           <td><button type="button" class="gl-btn" data-action="fund-del-year" data-key="${keyAttr}" data-year="${s.fiscal_year}" aria-label="${s.fiscal_year}년 삭제" title="${s.fiscal_year}년 삭제">×</button></td></tr>`
       )
       .join("");
-    body = `<div class="fund-tiles">${tiles}</div>${valueLine}${snapLine}${histLine}
+    body = `<div class="fund-tiles">${tiles}</div>${valueLine}${snapLine}${histLine}${corpNote}
       <div class="fund-table-wrap"><table class="fund-table"><thead><tr><th>연도</th><th>매출</th><th>영업이익</th><th>순이익</th><th>자산</th><th>부채</th><th>자본</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
       ${fundBarsHtml(list.slice(-6))}
       <div class="hd-note">출처: ${list.map((s) => s.fiscal_year + " " + ({ twelvedata: "Twelve Data", datagokr: "공공데이터포털", manual: "직접 입력", csv: "CSV" }[s.source_kind] || s.source_kind)).slice(-6).join(", ")}</div>`;
@@ -2063,7 +2092,9 @@ function fundamentalsSectionHtml(r, ctx) {
     </div>
     <button type="button" class="fetch-btn" data-action="fund-save" data-key="${keyAttr}">저장</button>
     <span class="hd-note fund-form-status"></span>
-    <div class="hd-note">같은 연도를 다시 저장하면 입력한 칸만 덮어씁니다. 칸을 비우면 기존 값은 그대로입니다.</div></details>`;
+    <div class="hd-note">같은 연도를 다시 저장하면 입력한 칸만 덮어씁니다. 칸을 비우면 기존 값은 그대로입니다.</div>
+    ${market === "kr" ? `<div class="fund-crno"><label>법인등록번호(13자리, 자동으로 못 찾을 때)<input type="text" inputmode="numeric" maxlength="13" data-fund-crno value="${escapeHtml(corp ? corp.crno : "")}" /></label>
+      <button type="button" class="fetch-btn" data-action="fund-crno-save" data-key="${keyAttr}">번호 저장</button></div>` : ""}</details>`;
   return `<div class="hd-section fund-section">
     <div class="hd-title">기업 브리핑 ${glossaryBtn("fundamentals")} <span class="hd-note">결산 재무 · 참고용</span> ${fetchBtn}</div>
     <div class="fund-status hd-note" data-key="${keyAttr}"></div>
@@ -2080,8 +2111,96 @@ async function fetchTwelveDataJson(path, symbol, apiKey) {
   return data;
 }
 
+// ----- 국내: 공공데이터포털 기업기본정보(법인등록번호 찾기) → 기업재무정보(요약재무제표) -----
+const DATAGOKR_CORP_URL = "https://apis.data.go.kr/1160100/service/GetCorpBasicInfoService_V2/getCorpOutline_V2";
+const DATAGOKR_FIN_URL = "https://apis.data.go.kr/1160100/service/GetFinaStatInfoService_V2/getSummFinaStat_V2";
+
+async function fetchDataGoKrService(url, apiKey, query, numOfRows) {
+  const params = new URLSearchParams({ serviceKey: apiKey, resultType: "json", numOfRows: String(numOfRows), pageNo: "1", ...query });
+  const res = await fetch(`${url}?${params.toString()}`);
+  let data;
+  try {
+    data = await res.json();
+  } catch (e) {
+    throw new Error("공공데이터포털 응답을 읽을 수 없습니다");
+  }
+  if (!data.response) {
+    const head = (data && data.OpenAPI_ServiceResponse && data.OpenAPI_ServiceResponse.cmmMsgHeader) || {};
+    const code = String(head.errMsg || "");
+    if (/NOT_REGISTERED/.test(code)) throw new Error("서비스키가 이 API에 등록되어 있지 않습니다(활용신청 승인 전이거나 키가 다릅니다)");
+    if (/LIMITED|EXCEEDS/.test(code)) throw new Error("공공데이터포털 호출 한도를 넘었습니다");
+    throw new Error(head.returnAuthMsg || "공공데이터포털 조회에 실패했습니다");
+  }
+  const header = data.response.header || {};
+  if (header.resultCode && String(header.resultCode) !== "00") throw new Error(header.resultMsg || `공공데이터포털 오류 ${header.resultCode}`);
+  const items = data.response.body && data.response.body.items && data.response.body.items.item;
+  return Array.isArray(items) ? items : items ? [items] : [];
+}
+
+// 종목명으로 법인등록번호를 찾는다(찾으면 저장해 두고 다음부터 재사용). 사용자가 직접 넣은 번호가 있으면 그것을 쓴다.
+async function resolveCorpId(stockName, apiKey) {
+  const key = holdingKey("kr", stockName);
+  const saved = loadCorpIds()[key];
+  if (saved && saved.crno) return { ok: true, crno: saved.crno, corp_name: saved.corp_name || "" };
+  const base = Fundamentals.commonStockName(stockName);
+  let last = { status: "none", candidates: [] };
+  for (const name of [...new Set([stockName, base, `${base}(주)`, `(주)${base}`])]) {
+    const items = await fetchDataGoKrService(DATAGOKR_CORP_URL, apiKey, { corpNm: name }, 100);
+    if (items.length === 0) continue;
+    const pick = Fundamentals.pickCorpMatch(items, stockName);
+    if (pick.status === "one") {
+      const ids = loadCorpIds();
+      ids[key] = { crno: pick.crno, corp_name: pick.corp_name };
+      saveCorpIds(ids);
+      return { ok: true, crno: pick.crno, corp_name: pick.corp_name };
+    }
+    last = pick;
+    if (pick.status === "many") break;
+  }
+  const list = last.candidates.map((c) => `${c.corp_name}(${c.crno})`).join(", ");
+  return {
+    ok: false,
+    message:
+      last.status === "many"
+        ? `같은 이름의 법인이 여러 개입니다: ${list}. 직접 입력 > 법인등록번호에 맞는 번호를 넣어 주세요`
+        : `종목명과 같은 법인을 찾지 못했습니다${list ? ` (비슷한 법인: ${list})` : ""}. 직접 입력 > 법인등록번호에 번호를 넣어 주세요`,
+  };
+}
+
+async function fetchFundamentalsKR(stockName) {
+  const key = holdingKey("kr", stockName);
+  const apiKey = loadKrApiKey();
+  if (!apiKey) return { ok: false, message: "공공데이터포털 API 키가 설정에 없습니다" };
+  try {
+    const corp = await resolveCorpId(stockName, apiKey);
+    if (!corp.ok) return corp;
+    const items = await fetchDataGoKrService(DATAGOKR_FIN_URL, apiKey, { crno: corp.crno }, 100);
+    if (items.length === 0) return { ok: false, message: "이 법인의 재무 정보가 없습니다(신규 상장이거나 아직 공시되지 않았을 수 있습니다). 직접 입력·CSV로 넣을 수 있습니다" };
+    const parsed = Fundamentals.parseDataGoKrSummary(items, new Date().toISOString());
+    if (parsed.summaries.length === 0) {
+      return { ok: false, message: `응답에서 재무 항목을 읽지 못했습니다 (받은 항목: ${parsed.seen_fields.slice(0, 12).join(", ")}${parsed.missing.length ? ` / 못 찾은 항목: ${parsed.missing.join(", ")}` : ""})` };
+    }
+    let map = loadFundamentals();
+    let added = 0;
+    parsed.summaries.forEach((s) => {
+      const r = Fundamentals.upsertYear(map, key, s);
+      map = r.map;
+      if (r.added) added++;
+    });
+    saveFundamentals(map);
+    return { ok: true, years: parsed.summaries.length, added, problems: [] };
+  } catch (e) {
+    return { ok: false, message: e.message };
+  }
+}
+
+// 시장에 맞는 출처로 한 종목의 기업 정보를 받는다.
+function fetchFundamentalsOne(marketKind, stockName) {
+  return marketKind === "kr" ? fetchFundamentalsKR(stockName) : fetchFundamentalsUS(stockName);
+}
+
 // 한 미국 종목의 손익·재무상태·통계를 받아 저장한다. 하나라도 받으면 성공이고, 못 받은 것은 사유를 모아 돌려준다.
-async function fetchFundamentalsOne(stockName) {
+async function fetchFundamentalsUS(stockName) {
   const key = holdingKey("us", stockName);
   const symbol = loadSymbols()[key];
   if (!symbol) return { ok: false, message: "시세 코드가 없습니다" };
@@ -2122,22 +2241,25 @@ async function fetchFundamentalsOne(stockName) {
 }
 
 let fundamentalsRunning = false;
-async function fetchFundamentalsAllUS() {
+async function fetchFundamentalsAll() {
   const symbols = loadSymbols();
   const fund = loadFundamentals();
   const recently = (key) => {
     const latest = Fundamentals.latestSummary(fund, key);
-    return latest && latest.collected_at && Date.now() - Date.parse(latest.collected_at) < 30 * 24 * 3600 * 1000 && latest.source_kind === "twelvedata";
+    return latest && latest.collected_at && Date.now() - Date.parse(latest.collected_at) < 30 * 24 * 3600 * 1000 && ["twelvedata", "datagokr"].includes(latest.source_kind);
   };
-  const targets = computeHoldings(loadTransactions()).filter((h) => h.market_kind === "us" && symbols[holdingKey("us", h.stock_name)] && !recently(holdingKey("us", h.stock_name)));
+  // 국내(호출 제한이 느슨함)를 먼저, 미국(분당 8회 제한)은 뒤에서 천천히. 시세 코드가 있는 종목만, 최근 30일 안에 받은 종목은 건너뜀
+  const targets = computeHoldings(loadTransactions())
+    .filter((h) => symbols[holdingKey(h.market_kind, h.stock_name)] && !recently(holdingKey(h.market_kind, h.stock_name)))
+    .sort((a, b) => (a.market_kind === b.market_kind ? 0 : a.market_kind === "kr" ? -1 : 1));
   const failed = [];
   let filled = 0;
   for (let i = 0; i < targets.length; i++) {
     setFundManageStatus(`기업 정보 받는 중... (${i + 1}/${targets.length}) ${targets[i].stock_name}`);
-    const result = await fetchFundamentalsOne(targets[i].stock_name);
+    const result = await fetchFundamentalsOne(targets[i].market_kind, targets[i].stock_name);
     if (result.ok) filled++;
     else failed.push(`${targets[i].stock_name}: ${result.message}`);
-    if (i < targets.length - 1) await sleep(REFRESH_GAP_MS.us);
+    if (i < targets.length - 1) await sleep(REFRESH_GAP_MS[targets[i].market_kind] ?? 0);
   }
   return { target_cnt: targets.length, filled, failed };
 }
@@ -2190,11 +2312,11 @@ function setupFundamentals() {
     const fetchBtn = event.target.closest('[data-action="fund-fetch"]');
     if (fetchBtn) {
       const key = fetchBtn.dataset.key;
-      const { stock_name } = splitHoldingKey(key);
+      const { market_kind, stock_name } = splitHoldingKey(key);
       const status = statusOf(key);
-      if (status) status.textContent = "기업 정보를 받는 중... (손익·재무상태·통계 3번 조회, 약 20초)";
+      if (status) status.textContent = market_kind === "us" ? "기업 정보를 받는 중... (손익·재무상태·통계 3번 조회, 약 20초)" : "기업 정보를 받는 중... (법인 확인 후 재무 조회)";
       fetchBtn.disabled = true;
-      const result = await fetchFundamentalsOne(stock_name);
+      const result = await fetchFundamentalsOne(market_kind, stock_name);
       openHoldingKeys.add(key);
       render();
       const after = statusOf(key);
@@ -2236,6 +2358,25 @@ function setupFundamentals() {
       if (after) after.textContent = `${raw.fiscal_year}년 ${r.added ? "추가" : "갱신"}했습니다.`;
       return;
     }
+    const crnoBtn = event.target.closest('[data-action="fund-crno-save"]');
+    if (crnoBtn) {
+      const key = crnoBtn.dataset.key;
+      const value = crnoBtn.closest(".fund-crno").querySelector("[data-fund-crno]").value.replace(/[^0-9]/g, "");
+      const status = statusOf(key);
+      if (value !== "" && value.length !== 13) {
+        if (status) status.textContent = "법인등록번호는 숫자 13자리입니다.";
+        return;
+      }
+      const ids = loadCorpIds();
+      if (value === "") delete ids[key];
+      else ids[key] = { crno: value, corp_name: "(직접 입력)" };
+      saveCorpIds(ids);
+      openHoldingKeys.add(key);
+      render();
+      const after = statusOf(key);
+      if (after) after.textContent = value === "" ? "법인등록번호를 지웠습니다(다음 조회 때 다시 찾습니다)." : "법인등록번호를 저장했습니다. '기업 정보 받기'를 누르세요.";
+      return;
+    }
     const delBtn = event.target.closest('[data-action="fund-del-year"]');
     if (delBtn) {
       const key = delBtn.dataset.key;
@@ -2257,12 +2398,12 @@ function setupFundamentals() {
     const btn = document.getElementById("fund-fetch-all-btn");
     btn.disabled = true;
     try {
-      const r = await fetchFundamentalsAllUS();
+      const r = await fetchFundamentalsAll();
       render();
       const shown = r.failed.slice(0, 2).join(", ") + (r.failed.length > 2 ? ` 외 ${r.failed.length - 2}개` : "");
       setFundManageStatus(
         r.target_cnt === 0
-          ? "받을 미국 종목이 없습니다 (시세 코드가 없거나 최근 30일 안에 받은 종목은 건너뜁니다)."
+          ? "받을 종목이 없습니다 (시세 코드가 없거나 최근 30일 안에 받은 종목은 건너뜁니다)."
           : `기업 정보 ${r.filled}종목 받음` + (r.failed.length > 0 ? ` · 실패 ${r.failed.length}개 (${shown})` : "")
       );
     } finally {
@@ -3852,6 +3993,8 @@ function collectBackupData() {
     signal_settings: loadSignalSettings(),
     fundamentals_map: loadFundamentals(),
     valuation_history_map: loadValuations(),
+    listed_shares_map: loadListedShares(),
+    corp_id_map: loadCorpIds(),
     us_price_api_key: loadApiKey(),
     kr_price_api_key: loadKrApiKey(),
   };
@@ -3892,6 +4035,8 @@ async function handleJsonImportFile(file) {
   if (data.signal_settings && typeof data.signal_settings === "object") saveSignalSettings(data.signal_settings);
   if (data.fundamentals_map && typeof data.fundamentals_map === "object") saveFundamentals(data.fundamentals_map);
   if (data.valuation_history_map && typeof data.valuation_history_map === "object") saveValuations(data.valuation_history_map);
+  if (data.listed_shares_map && typeof data.listed_shares_map === "object") localStorage.setItem(SHARES_KEY, JSON.stringify(data.listed_shares_map));
+  if (data.corp_id_map && typeof data.corp_id_map === "object") saveCorpIds(data.corp_id_map);
   if (typeof data.us_price_api_key === "string") saveApiKey(data.us_price_api_key);
   if (typeof data.kr_price_api_key === "string") saveKrApiKey(data.kr_price_api_key);
 

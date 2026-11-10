@@ -1195,3 +1195,6 @@ details.help summary {
 .fund-form-grid label { display: flex; flex-direction: column; gap: 2px; font-size: 0.78rem; color: #cbd5e1; }
 .fund-form-grid input, .fund-form-grid select { padding: 4px 6px; background: #0f172a; color: #e2e8f0; border: 1px solid #334155; border-radius: 6px; }
 .hint-text:empty { display: none; } /* 빈 안내 줄이 간격만 차지하지 않게 */
+.fund-crno { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 6px; margin-top: 8px; }
+.fund-crno label { display: flex; flex-direction: column; gap: 2px; font-size: 0.78rem; color: #cbd5e1; flex: 1 1 200px; }
+.fund-crno input { padding: 4px 6px; background: #0f172a; color: #e2e8f0; border: 1px solid #334155; border-radius: 6px; }
