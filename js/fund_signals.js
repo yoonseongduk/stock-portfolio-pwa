@@ -238,7 +238,7 @@
    */
   function buildFundSummary(items, settings) {
     const fund_summary_row_list = (items || []).map((it) => {
-      const health = assessHealth(it.years, settings);
+      const health = it.health || assessHealth(it.years, settings); // 종목 분석 모델이 이미 계산했으면 그것을 쓴다(BL-46)
       const { latest, prev } = latestPair(it.years);
       const sorted = [...health.reasons].sort((x, y) => TONE_RANK[x.tone] - TONE_RANK[y.tone]);
       const reasonText = it.is_fund_like ? "ETF라 재무 없음" : latest ? sorted.slice(0, 2).map((r) => r.text).join(" · ") : "재무 없음 (기업 정보 받기 필요)";

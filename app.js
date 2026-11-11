@@ -350,11 +350,23 @@ function computeHoldings(transactions) {
 // profit_rate 는 0~1 소수다(표준, NR-10). 화면에서만 formatPercent 가 %로 바꾼다.
 /** @param {{holding_quantity:number, average_price:number}} h @param {number} currentPrice */
 function calc(h, currentPrice) {
-  const buy_amount = h.holding_quantity * h.average_price;
-  const evaluation_amount = h.holding_quantity * currentPrice;
-  const profit_amount = evaluation_amount - buy_amount;
-  const profit_rate = buy_amount === 0 ? 0 : profit_amount / buy_amount;
-  return { buy_amount, evaluation_amount, profit_amount, profit_rate };
+  return StockView.calcProfit(h, currentPrice); // 계산은 종목 분석 모델(js/stock_view.js)에 한 벌만 있다(CM-042)
+}
+
+// 종목 분석 결과(StockView)를 보유 종목 전체에 대해 만든다. 화면은 이 결과만 읽는다(design/17 §6).
+// 저장된 데이터와 계산 기준값을 읽어 js/stock_view.js 에 넘기는 일만 하고 계산은 하지 않는다.
+function computeStockViews(holdings, prices, symbols, info) {
+  const historyMap = loadPriceHistory();
+  const fundMap = loadFundamentals();
+  const settings = { signal: loadSignalSettings(), atr_period: loadAlertSettings().atr_period, market: loadMarketSettings(), fund: loadFundSignalSettings() };
+  const today = todayISO();
+  return StockView.buildStockViews(
+    holdings.map((h) => {
+      const key = holdingKey(h.market_kind, h.stock_name);
+      return { holding_key: key, holding: h, current_price: prices[key] || 0, symbol_code: (symbols || {})[key] || "", info: (info || {})[key] || {}, history: historyMap[key], fund_years: Fundamentals.yearsOf(fundMap, key) };
+    }),
+    { settings, today_iso: today }
+  );
 }
 
 // --- 시세 자동 조회 ---
@@ -1401,21 +1413,22 @@ function renderHoldingsToolbar(allRows, shownCount) {
       : "");
 }
 
-function renderHoldings(holdings, prices, symbols, info = {}, transactions = [], dividends = []) {
+function renderHoldings(holdings, prices, symbols, info = {}, transactions = [], dividends = [], views = null) {
   const holdingsArea = document.getElementById("holdings-area");
   const allRows = buildHoldingRows(holdings, prices, symbols, info);
   const signalSettings = loadSignalSettings();
   const historyMap = loadPriceHistory();
   const atrPeriod = loadAlertSettings().atr_period;
-  allRows.forEach((r) => (r.signal = Signals.computeSignal(historyMap[r.key], signalSettings, atrPeriod, { average_price: r.h.average_price })));
   const fundMapAll = loadFundamentals();
-  const fundSettings = loadFundSignalSettings();
-  const marketSettings = loadMarketSettings();
-  const todayStr = todayISO();
+  // 시그널·시장 상태·재무 건강·종합 판단은 종목 분석 모델(StockView)에서 한 번에 받는다
+  const viewByKey = new Map((views || computeStockViews(holdings, prices, symbols, info)).map((v) => [v.holding_key, v]));
   allRows.forEach((r) => {
-    r.market = MarketStatus.analyzeMarketStatus(historyMap[r.key], todayStr, marketSettings, { marketKind: r.h.market_kind });
-    r.health = FundSignals.assessHealth(Fundamentals.yearsOf(fundMapAll, r.key), fundSettings);
-    r.combined = FundSignals.combinedView(r.market.signals_unreliable ? "neutral" : r.signal.signal_state, r.health.health_state); // 거래정지 의심이면 시세 시그널은 쓰지 않는다
+    const v = viewByKey.get(r.key);
+    r.view = v;
+    r.signal = v.signal;
+    r.market = v.market;
+    r.health = v.health;
+    r.combined = v.combined;
   });
 
   if (allRows.length === 0) {
@@ -3004,14 +3017,11 @@ function renderFundLog() {
 
 // ===== 재무 점검 요약표 (BL-39, design/13 §3-1) =====
 // 보유 종목 전체의 재무 건강을 한 표로 모은다. 계산은 FundSignals.buildFundSummary(순수 함수), 저장하지 않는다.
-function renderFundCheck(holdings) {
+function renderFundCheck(holdings, views = null) {
   const area = document.getElementById("fundcheck-area");
   if (!area) return;
-  const fundMap = loadFundamentals();
-  const items = holdings.map((h) => {
-    const key = holdingKey(h.market_kind, h.stock_name);
-    return { key, stock_name: h.stock_name, market_kind: h.market_kind, years: Fundamentals.yearsOf(fundMap, key), is_fund_like: Fundamentals.isFundLike(h.stock_name) };
-  });
+  const list = views || computeStockViews(holdings, loadPrices(), loadSymbols(), loadStockInfo());
+  const items = list.map((v) => ({ key: v.holding_key, stock_name: v.stock_name, market_kind: v.market_kind, years: v.fund_years, health: v.health, is_fund_like: v.is_fund_like }));
   const sum = FundSignals.buildFundSummary(items, loadFundSignalSettings());
   document.getElementById("fundcheck-count").innerHTML =
     `재무 수집 <strong>${sum.fund_collected_cnt}/${sum.fund_target_cnt}</strong>종목` +
@@ -3091,17 +3101,15 @@ const FUND_EVENT_LABEL = {
 };
 
 // 보유 종목의 기업 이벤트 상태를 갱신하고 아직 확인하지 않은 이벤트를 돌려준다. 바뀌었을 때만 저장한다.
-function syncFundEvents(holdings, prices) {
+function syncFundEvents(holdings, prices, views = null) {
   const fundMap = loadFundamentals();
   const sharesMap = loadListedShares();
   const settings = loadFundSignalSettings();
-  const historyMap = loadPriceHistory();
-  const marketSettings = loadMarketSettings();
-  const today = todayISO();
+  const viewByKey = new Map((views || computeStockViews(holdings, prices, loadSymbols(), loadStockInfo())).map((v) => [v.holding_key, v]));
   const items = holdings.map((h) => {
     const key = holdingKey(h.market_kind, h.stock_name);
     const { list, val } = fundValuationFor(key, prices[key] || 0, fundMap, sharesMap);
-    const ms = MarketStatus.analyzeMarketStatus(historyMap[key], today, marketSettings, { marketKind: h.market_kind });
+    const ms = viewByKey.get(key).market;
     return { key, years: list, zone: FundSignals.valuationZone(val, settings), halted: ms.halted, halt_text: ms.halted ? ms.items[0].text : "" };
   });
   const result = FundSignals.evaluateFundEvents(loadFundEvents(), items, settings, new Date().toISOString());
@@ -3819,14 +3827,15 @@ function render() {
   renderKnownStockNames(transactions);
   renderAlertBanner(syncAlerts(holdings, prices).pending); // 목표가·손절가 규칙 맞춤·판정 (보유 화면보다 먼저)
   renderSignalBanner(syncSignals(holdings).pending); // 시세 시그널 변경 알림
-  renderFundEventBanner(syncFundEvents(holdings, prices).pending); // 기업 이벤트(재무·가치 구간) 알림
+  const views = computeStockViews(holdings, prices, symbols, loadStockInfo()); // 종목 분석 결과(StockView)를 한 번만 계산해 화면들이 같이 쓴다
+  renderFundEventBanner(syncFundEvents(holdings, prices, views).pending); // 기업 이벤트(재무·가치 구간) 알림
   renderFundLog(); // 기업 정보 수집 기록·Alpha Vantage 사용량
-  renderFundCheck(holdings); // 재무 점검 요약표 (BL-39)
+  renderFundCheck(holdings, views); // 재무 점검 요약표 (BL-39)
 
   renderDashboard(holdings, prices);
   renderShare(holdings, prices);
   renderRank(holdings, prices);
-  renderHoldings(holdings, prices, symbols, loadStockInfo(), transactions, loadDividends());
+  renderHoldings(holdings, prices, symbols, loadStockInfo(), transactions, loadDividends(), views);
   renderTransactions(transactions);
   renderDividends(loadDividends());
 }
