@@ -2708,7 +2708,7 @@ function setupFundamentals() {
       const after = statusOf(key);
       if (after) {
         after.textContent = result.ok
-          ? (result.years > 0 ? `기업 정보 ${result.years}개 연도를 받았습니다 (새 연도 ${result.added}건)` : (result.profile ? "기업 소개만 받았습니다" : "받은 재무가 없습니다") + ` (재무는 받지 못했습니다${result.message ? ": " + result.message : ""})`) + (result.profile ? " · 기업 소개 반영" : "") + (result.problems.length ? ` · 일부 실패: ${result.problems[0]}` : "")
+          ? (result.years > 0 ? `기업 정보 ${result.years}개 연도를 받았습니다 (새 연도 ${result.added}건)` : (result.profile ? "기업 소개만 받았습니다 (재무 값은 비어 있습니다)" : "받았지만 재무 값이 없습니다")) // 자세한 이유는 아래 재무 칸에 한 번만 보인다 + (result.profile ? " · 기업 소개 반영" : "") + (result.problems.length ? ` · 일부 실패: ${result.problems[0]}` : "")
           : `받지 못했습니다: ${result.message}`;
       }
       return;
