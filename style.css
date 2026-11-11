@@ -1240,12 +1240,6 @@ details.help summary {
 .fl-ok { color: #cbd5e1; }
 .fl-fail { color: #fca5a5; }
 
-/* ===== 재무 점검 요약표 (design/13 §3-1, BL-39) ===== */
-.fundcheck-count { font-size: 0.95rem; margin-bottom: 4px; }
-.fundcheck-table td small { color: #94a3b8; }
-.fundcheck-row { cursor: pointer; }
-.fundcheck-reason td { white-space: normal; text-align: left; border-bottom: 1px solid #334155; padding-bottom: 6px; }
-
 /* ===== 종목 목록 줄과 종목 상세 화면 (design/17 §3, BL-47) ===== */
 .holding-row { position: relative; cursor: pointer; padding-right: 22px; }
 .holding-row:focus-visible { outline: 2px solid #60a5fa; outline-offset: -2px; }
@@ -1255,3 +1249,12 @@ details.help summary {
 .stock-detail .sd-summary { display: grid; padding: 8px 10px; border: 1px solid #334155; border-radius: 10px; background: #0f172a; cursor: default; }
 .sd-section { margin-top: 12px; padding: 8px 10px; border: 1px solid #1e293b; border-radius: 10px; background: #0b1220; }
 .sd-title { margin: 0 0 6px; font-size: 0.95rem; color: #93c5fd; }
+
+/* ===== 목록 보기 전환: 시그널 줄·재무 줄 (design/17 §3, BL-48) ===== */
+#hv-view { margin-bottom: 4px; }
+.holding-row .sv-line { margin-top: 4px; display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap; }
+.fund-count { font-size: 0.95rem; margin: 4px 0; }
+.fund-row .fr-metrics { display: block; font-size: 0.8rem; color: #cbd5e1; margin-top: 2px; }
+.fund-row .fr-metrics small { color: #94a3b8; }
+.fund-row .fr-reason { margin-top: 2px; }
+.holding-row .hd-note { font-size: 0.78rem; line-height: 1.35; }

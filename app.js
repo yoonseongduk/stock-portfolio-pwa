@@ -941,6 +941,7 @@ const DEFAULT_HOLDINGS_VIEW = {
   group_kind: "market", // market | sector
   signal_filter: "all", // all | buy_watch | rebound_watch | sell_review
   search_text: "",
+  view_kind: "basic", // basic(기본) | signal(시그널) | fund(재무) — 같은 종목 목록의 보기 전환(design/17 §3)
 };
 
 function escapeHtml(value) {
@@ -1012,6 +1013,7 @@ function loadHoldingsView() {
     if (["market", "sector"].includes(saved.group_kind)) view.group_kind = saved.group_kind;
     if (["all", "buy_watch", "rebound_watch", "sell_review"].includes(saved.signal_filter)) view.signal_filter = saved.signal_filter;
     if (typeof saved.search_text === "string") view.search_text = saved.search_text;
+    if (["basic", "signal", "fund"].includes(saved.view_kind)) view.view_kind = saved.view_kind;
   } catch (e) {
     // 저장된 설정을 못 읽으면 기본값으로 시작한다
   }
@@ -1334,12 +1336,56 @@ function holdingSummaryHtml(r, ctx) {
 }
 
 // 종목 목록의 한 줄: 누르면 종목 상세 화면으로 간다(design/17 §3). 펼침 상세는 없다.
-function holdingRowHtml(r, ctx) {
+function holdingRowHtml(r, ctx, kind = "basic") {
   const key = escapeHtml(r.key);
   return `<div class="holding-item holding-row" data-key="${key}" data-action="open-stock" role="button" tabindex="0">
     <div class="holding-summary">${holdingSummaryHtml(r, ctx)}</div>
+    ${kind === "signal" ? signalLineHtml(r) : ""}
     <span class="hs-go" aria-hidden="true">›</span>
   </div>`;
+}
+
+// 시그널 보기의 한 줄: 시그널 상태와 첫 근거(없으면 이유)
+function signalLineHtml(r) {
+  const sig = r.signal;
+  let text;
+  if (r.market && r.market.signals_unreliable) text = "거래정지가 의심되어 시세 시그널을 쓰지 않습니다";
+  else if (!sig || sig.signal_state === "insufficient") text = `시세 기록이 부족합니다(${sig ? sig.metrics.rows_cnt : 0}일 / 최소 ${sig ? sig.needed_cnt : "?"}일). 종목 상세에서 과거 시세 채우기`;
+  else {
+    const reasons = sig.signal_state === "sell_review" ? sig.sell_reasons : sig.buy_reasons;
+    if (["buy_watch", "rebound_watch", "sell_review"].includes(sig.signal_state)) text = reasons[0] || "";
+    else text = sig.mixed ? "매수·매도 근거가 엇갈려 중립으로 봅니다" : "특이한 신호가 없습니다";
+  }
+  const badge = signalBadgeHtml(sig && !(r.market && r.market.signals_unreliable) ? sig : null);
+  return `<div class="sv-line">${badge}<span class="hd-note">${escapeHtml(text)}</span></div>`;
+}
+
+// 재무 보기: 종목마다 부채비율·영업이익·재무 건강·근거 한 줄(위험한 종목이 위로). 수집 N/전체는 맨 위에(필터와 무관하게 전체 기준)
+function fundViewHtml(allRows, rows) {
+  const items = allRows.map((r) => ({ key: r.key, stock_name: r.h.stock_name, market_kind: r.h.market_kind, years: r.view.fund_years, health: r.health, is_fund_like: r.view.is_fund_like }));
+  const sum = FundSignals.buildFundSummary(items, loadFundSignalSettings());
+  const shown = new Set(rows.map((r) => r.key));
+  const growthText = (g) => (g === null ? "" : ` <small>(전년 ${g >= 0 ? "+" : ""}${(g * 100).toFixed(0)}%)</small>`);
+  const head =
+    `<div class="fund-count">재무 수집 <strong>${sum.fund_collected_cnt}/${sum.fund_target_cnt}</strong>종목` +
+    (sum.fund_excluded_cnt > 0 ? ` <span class="hd-note">(ETF ${sum.fund_excluded_cnt}종목 제외 ${glossaryBtn("etf")})</span>` : "") +
+    (sum.fund_missing_cnt > 0 ? ` <span class="hd-note">(${sum.fund_missing_cnt}종목은 기업 정보를 아직 받지 않았습니다. 위쪽 '기업 정보 관리'에서 받으세요)</span>` : "") +
+    `</div><p class="hint-text">보유 종목의 저장된 공시 재무로 계산한 참고 정보이며 투자 권유가 아닙니다. 위험한 종목이 위에 나옵니다.</p>`;
+  const body = sum.fund_summary_row_list
+    .filter((x) => shown.has(x.key))
+    .map(
+      (x) => `<div class="holding-item holding-row fund-row" data-key="${escapeHtml(x.key)}" data-action="open-stock" role="button" tabindex="0">
+      <div class="holding-summary">
+        <span class="hs-name holding-item-name">${escapeHtml(x.stock_name)}</span>
+        <span class="hs-tags"><span class="tag">${x.market_kind === "kr" ? "국내" : "미국"}</span>${x.last_fiscal_year ? `<span class="tag">${x.last_fiscal_year}년</span>` : ""}<span class="fund-badge fund-${x.health_state}">${FundSignals.HEALTH_LABEL[x.health_state]}</span></span>
+        <span class="hs-info fr-metrics">부채비율 ${glossaryBtn("debt_ratio")} ${fmtRate(x.debt_ratio_rate)} · 영업이익 ${glossaryBtn("operating_profit")} ${x.operating_profit_amount === null ? "-" : fmtBig(x.operating_profit_amount, x.market_kind)}${growthText(x.operating_profit_growth_rate)}</span>
+      </div>
+      <div class="hd-note fr-reason">${escapeHtml(x.reason_text)}</div>
+      <span class="hs-go" aria-hidden="true">›</span>
+    </div>`
+    )
+    .join("");
+  return head + body;
 }
 
 // 상세 화면의 한 묶음. 안이 비면 묶음 전체를 그리지 않는다.
@@ -1350,9 +1396,11 @@ function stockSectionHtml(title, inner) {
 // 종목 상세 화면(별도 화면, design/17 §3): 요약 → 판단 → 시세 → 재무·기업 → 내 기록 → 데이터
 function stockDetailHtml(r, ctx) {
   const { key, market, share, trades, tradeHtml, div, exchangeOptions, symbolPlaceholder } = holdingLocals(r, ctx);
+  const fp = fundamentalsParts(r, ctx);
   const judge = `
         ${signalSectionHtml(r, ctx)}
         ${marketStatusSectionHtml(r)}
+        ${fp.health}
   `;
   const chart = `
         <div class="hd-section">
@@ -1362,9 +1410,6 @@ function stockDetailHtml(r, ctx) {
           ${priceChartHtml(ctx.historyByKey[r.key] || [], r.h.average_price, market, Signals.trailingStopSeries(ctx.historyByKey[r.key] || [], ctx.signalSettings.trail_lookback_days, ctx.signalSettings.trail_atr_multiple, ctx.atrPeriod), chartMaSpecs().filter((m) => chartLayersOn.has(m.period)).map((m) => ({ ...m, points: Signals.smaSeries(ctx.historyByKey[r.key] || [], m.period) })), maToggleHtml())}
           ${rsiChartHtml(ctx.historyByKey[r.key] || [], Signals.rsiSeries(ctx.historyByKey[r.key] || [], ctx.signalSettings.rsi_period), ctx.signalSettings)}
         </div>
-  `;
-  const fund = `
-        ${fundamentalsSectionHtml(r, ctx)}
   `;
   const mine = `
         <div class="holding-item-detail">
@@ -1417,7 +1462,8 @@ function stockDetailHtml(r, ctx) {
     <div class="holding-body">
       ${stockSectionHtml("판단", judge)}
       ${stockSectionHtml("시세", chart)}
-      ${stockSectionHtml("재무·기업", fund)}
+      ${stockSectionHtml("재무", fp.fund)}
+      ${stockSectionHtml("기업", fp.profile)}
       ${stockSectionHtml("내 기록", mine)}
       ${stockSectionHtml("데이터", data)}
     </div>
@@ -1514,22 +1560,24 @@ function renderHoldings(holdings, prices, symbols, info = {}, transactions = [],
   const sectorOptions = [...new Set(allRows.map((r) => r.sector_name).filter(Boolean))]
     .map((n) => `<option value="${escapeHtml(n)}"></option>`)
     .join("");
-  holdingsArea.innerHTML =
-    `<datalist id="sector-list">${sectorOptions}</datalist>` +
-    (groups.length === 0
-      ? '<p class="empty-message">조건에 맞는 종목이 없습니다.</p>'
-      : groups
-          .map(
-            (g) => `
+  const kind = holdingsView.view_kind;
+  let listHtml;
+  if (rows.length === 0) listHtml = '<p class="empty-message">조건에 맞는 종목이 없습니다.</p>';
+  else if (kind === "fund") listHtml = fundViewHtml(allRows, rows);
+  else
+    listHtml = groups
+      .map(
+        (g) => `
       <details class="holding-group" data-group="${escapeHtml(g.id)}" ${collapsedGroupIds.has(g.id) ? "" : "open"}>
         <summary class="group-summary">
           <span class="gs-title">${escapeHtml(g.label)} <span class="gs-count">(${g.rows.length}종목)</span></span>
           <span class="gs-total">${groupTotalsText(g.rows)}</span>
         </summary>
-        ${g.rows.map((r) => holdingRowHtml(r, ctx)).join("")}
+        ${g.rows.map((r) => holdingRowHtml(r, ctx, kind)).join("")}
       </details>`
-          )
-          .join(""));
+      )
+      .join("");
+  holdingsArea.innerHTML = `<datalist id="sector-list">${sectorOptions}</datalist>` + listHtml;
 }
 
 // ===== 자동 채우기 (design/07_보유종목그룹.md §3-1) =====
@@ -2158,8 +2206,8 @@ const FUND_UNITS = {
   us: [["백만달러", 1e6], ["십억달러", 1e9], ["달러", 1]],
 };
 
-// 종목 상세의 '기업 브리핑' 영역.
-function fundamentalsSectionHtml(r, ctx) {
+// 종목 상세의 '기업 브리핑' 영역을 판단(재무 건강·종합 판단)·재무·기업(이 기업은?) 세 묶음으로 나눠 돌려준다(design/17 §3).
+function fundamentalsParts(r, ctx) {
   const key = r.key;
   const market = r.h.market_kind;
   const list = Fundamentals.yearsOf(ctx.fundMap, key);
@@ -2176,6 +2224,7 @@ function fundamentalsSectionHtml(r, ctx) {
   const listed = ctx.sharesMap[key];
 
   let body;
+  let healthHtml = "";
   if (!latest) {
     body = `<div class="hd-note">저장된 기업 정보가 없습니다. '기업 정보 받기'로 가져오거나 직접 입력·CSV로 넣을 수 있습니다.</div>${corpNote}`;
   } else {
@@ -2216,7 +2265,8 @@ function fundamentalsSectionHtml(r, ctx) {
           <td><button type="button" class="gl-btn" data-action="fund-del-year" data-key="${keyAttr}" data-year="${s.fiscal_year}" aria-label="${s.fiscal_year}년 삭제" title="${s.fiscal_year}년 삭제">×</button></td></tr>`
       )
       .join("");
-    body = `${fundHealthHtml(r, ctx)}<div class="fund-tiles">${tiles}</div>${valueLine}${snapLine}${histLine}${corpNote}
+    healthHtml = fundHealthHtml(r, ctx);
+    body = `<div class="fund-tiles">${tiles}</div>${valueLine}${snapLine}${histLine}${corpNote}
       <div class="fund-table-wrap"><table class="fund-table"><thead><tr><th>연도</th><th>매출</th><th>영업이익</th><th>순이익</th><th>자산</th><th>부채</th><th>자본</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
       ${fundBarsHtml(list.slice(-6))}
       <div class="hd-note">출처: ${list.map((s) => s.fiscal_year + " " + ({ twelvedata: "Twelve Data", alphavantage: "Alpha Vantage", datagokr: "공공데이터포털", manual: "직접 입력", csv: "CSV" }[s.source_kind] || s.source_kind)).slice(-6).join(", ")}</div>`;
@@ -2237,12 +2287,15 @@ function fundamentalsSectionHtml(r, ctx) {
     <div class="hd-note">같은 연도를 다시 저장하면 입력한 칸만 덮어씁니다. 칸을 비우면 기존 값은 그대로입니다.</div>
     ${market === "kr" ? `<div class="fund-crno"><label>법인등록번호(13자리) 또는 사업자등록번호(10자리) — 자동으로 못 찾거나 같은 이름이 여럿일 때<input type="text" inputmode="numeric" maxlength="16" data-fund-crno value="${escapeHtml(corp ? corp.crno || corp.bzno || "" : "")}" /></label>
       <button type="button" class="fetch-btn" data-action="fund-crno-save" data-key="${keyAttr}">번호 저장</button></div>` : ""}</details>`;
-  return `<div class="hd-section fund-section">
+  return {
+    health: healthHtml,
+    profile: profileSectionHtml(r, ctx),
+    fund: `<div class="hd-section fund-section">
     <div class="hd-title">기업 브리핑 ${glossaryBtn("fundamentals")} <span class="hd-note">결산 재무 · 참고용</span> ${fetchBtn}</div>
     <div class="fund-status hd-note" data-key="${keyAttr}"></div>
-    ${profileSectionHtml(r, ctx)}
     ${body}${form}
-  </div>`;
+  </div>`,
+  };
 }
 
 // ----- 미국: Twelve Data 에서 받기 -----
@@ -3087,47 +3140,7 @@ function renderFundLog() {
 }
 // ===== 기업 정보 수집 기록 END =====
 
-// ===== 재무 점검 요약표 (BL-39, design/13 §3-1) =====
-// 보유 종목 전체의 재무 건강을 한 표로 모은다. 계산은 FundSignals.buildFundSummary(순수 함수), 저장하지 않는다.
-function renderFundCheck(holdings, views = null) {
-  const area = document.getElementById("fundcheck-area");
-  if (!area) return;
-  const list = views || computeStockViews(holdings, loadPrices(), loadSymbols(), loadStockInfo());
-  const items = list.map((v) => ({ key: v.holding_key, stock_name: v.stock_name, market_kind: v.market_kind, years: v.fund_years, health: v.health, is_fund_like: v.is_fund_like }));
-  const sum = FundSignals.buildFundSummary(items, loadFundSignalSettings());
-  document.getElementById("fundcheck-count").innerHTML =
-    `재무 수집 <strong>${sum.fund_collected_cnt}/${sum.fund_target_cnt}</strong>종목` +
-    (sum.fund_excluded_cnt > 0 ? ` <span class="hd-note">(ETF ${sum.fund_excluded_cnt}종목 제외 ${glossaryBtn("etf")})</span>` : "") +
-    (sum.fund_missing_cnt > 0 ? ` <span class="hd-note">(${sum.fund_missing_cnt}종목은 기업 정보를 아직 받지 않았습니다. 종목 화면의 '기업 정보 관리'에서 받으세요)</span>` : "");
-  if (sum.fund_summary_row_list.length === 0) {
-    area.innerHTML = '<p class="empty-message">아직 보유 중인 종목이 없습니다.</p>';
-    return;
-  }
-  const growthText = (g) => (g === null ? "" : ` <small>(전년 ${g >= 0 ? "+" : ""}${(g * 100).toFixed(0)}%)</small>`);
-  area.innerHTML = `<table class="fund-table fundcheck-table">
-    <thead><tr><th>종목</th><th>부채비율 ${glossaryBtn("debt_ratio")}</th><th>영업이익 ${glossaryBtn("operating_profit")}</th><th>재무 건강 ${glossaryBtn("fund_health")}</th></tr></thead>
-    <tbody>${sum.fund_summary_row_list
-      .map(
-        (r) => `<tr class="fundcheck-row" data-key="${escapeHtml(r.key)}">
-        <td>${escapeHtml(r.stock_name)}<small> ${r.market_kind === "kr" ? "국내" : "미국"}${r.last_fiscal_year ? ` · ${r.last_fiscal_year}년` : ""}</small></td>
-        <td>${fmtRate(r.debt_ratio_rate)}</td>
-        <td>${r.operating_profit_amount === null ? "-" : fmtBig(r.operating_profit_amount, r.market_kind)}${growthText(r.operating_profit_growth_rate)}</td>
-        <td><span class="fund-badge fund-${r.health_state}">${FundSignals.HEALTH_LABEL[r.health_state]}</span></td></tr>
-        <tr class="fundcheck-reason" data-key="${escapeHtml(r.key)}"><td colspan="4" class="hd-note">${escapeHtml(r.reason_text)}</td></tr>`
-      )
-      .join("")}</tbody></table>`;
-}
-
-function setupFundCheck() {
-  const area = document.getElementById("fundcheck-area");
-  area.addEventListener("click", (event) => {
-    if (event.target.closest("[data-glossary]")) return; // ? 버튼은 용어집이 처리한다
-    const row = event.target.closest("tr[data-key]");
-    if (!row) return;
-    goToHolding(row.dataset.key);
-  });
-}
-// ===== 재무 점검 요약표 END =====
+// (재무 점검 표는 종목 화면의 `재무` 보기로 합쳤다: fundViewHtml, BL-48)
 
 // ===== 재무 건강·기업 이벤트·종합 판단 (design/13_재무시그널과기업이벤트.md) =====
 // 계산은 js/fund_signals.js(FundSignals)가 하고, 여기서는 저장·화면·이벤트만 이어 준다.
@@ -3902,7 +3915,6 @@ function render() {
   const views = computeStockViews(holdings, prices, symbols, loadStockInfo()); // 종목 분석 결과(StockView)를 한 번만 계산해 화면들이 같이 쓴다
   renderFundEventBanner(syncFundEvents(holdings, prices, views).pending); // 기업 이벤트(재무·가치 구간) 알림
   renderFundLog(); // 기업 정보 수집 기록·Alpha Vantage 사용량
-  renderFundCheck(holdings, views); // 재무 점검 요약표 (BL-39)
 
   renderDashboard(holdings, prices);
   renderShare(holdings, prices);
@@ -5030,7 +5042,6 @@ const SCREENS = [
   { id: "dividends", label: "배당 기록", icon: "💰" },
   { id: "data", label: "데이터 관리", icon: "💾" },
   { id: "settings", label: "설정", icon: "⚙️" },
-  { id: "fundcheck", label: "재무 점검", icon: "🩺" },
   { id: "glossary", label: "용어집", icon: "📖" },
 ];
 
@@ -5083,6 +5094,13 @@ function parseScreenHash(hash) {
 
 function showScreen(id, options = {}) {
   const { push = true } = options;
+  if (id === "fundcheck") {
+    // 옛 '재무 점검' 화면 주소: 종목 화면의 재무 보기로 연결한다
+    holdingsView = { ...holdingsView, view_kind: "fund" };
+    saveHoldingsView();
+    id = "holdings";
+    renderHoldingsOnly();
+  }
   const parsed = parseScreenHash(id);
   let stockKey = options.stockKey || "";
   if (parsed.id === "stock") {
@@ -5252,7 +5270,6 @@ setupProfiles();
 setupUsDisplay();
 setupFundSignals();
 setupFundSignalSettings();
-setupFundCheck();
 setupMarketSettings();
 setupGlossary();
 setupRefreshAll();

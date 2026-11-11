@@ -87,6 +87,11 @@
         </details>
         <!-- 보기 설정: 시장·거래소·섹터 필터, 그룹·정렬, 검색 (design/07_보유종목그룹.md) -->
         <div class="holdings-toolbar" id="holdings-toolbar">
+          <div class="chip-row" id="hv-view">
+            <button type="button" class="chip" data-hv="view_kind" data-val="basic">기본</button>
+            <button type="button" class="chip" data-hv="view_kind" data-val="signal">시그널</button>
+            <button type="button" class="chip" data-hv="view_kind" data-val="fund">재무</button>
+          </div>
           <div class="chip-row" id="hv-market">
             <button type="button" class="chip" data-hv="market_filter" data-val="all">전체</button>
             <button type="button" class="chip" data-hv="market_filter" data-val="kr">국장</button>
@@ -365,15 +370,6 @@
         <input type="search" id="glossary-query" placeholder="용어 검색 (예: RSI, 손절, 이동평균)" autocomplete="off" />
         <p class="hint-text">앱에서 쓰는 주식 용어를 모았습니다. 지표는 과거 가격으로 계산한 참고 정보이며 매매 권유가 아닙니다.</p>
         <div id="glossary-area"></div>
-      </div>
-    </section>
-
-    <!-- 재무 점검 요약표 (더보기, BL-39) -->
-    <section class="screen" data-screen="fundcheck" hidden>
-      <div class="card">
-        <div id="fundcheck-count" class="fundcheck-count"></div>
-        <p class="hint-text">보유 종목의 저장된 공시 재무로 계산한 참고 정보이며 투자 권유가 아닙니다. 위험한 종목이 위에 나옵니다. 종목을 누르면 그 종목의 상세 화면으로 갑니다.</p>
-        <div id="fundcheck-area" class="fund-table-wrap"></div>
       </div>
     </section>
 
