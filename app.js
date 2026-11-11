@@ -2430,7 +2430,7 @@ async function fetchFundamentalsKR(stockName) {
       profileSaved = false;
     }
     const items = await fetchDataGoKrService(DATAGOKR_FIN_URL, apiKey, { crno: corp.crno }, 100);
-    if (items.length === 0) return { ok: profileSaved, years: 0, added: 0, problems: [], profile: profileSaved, message: "이 법인의 재무 정보가 없습니다(신규 상장이거나 아직 공시되지 않았을 수 있습니다). 직접 입력·CSV로 넣을 수 있습니다" };
+    if (items.length === 0) return { ok: true, empty: true, years: 0, added: 0, problems: [], profile: profileSaved, message: "공공데이터포털에 이 법인의 재무가 없습니다(신규 상장이거나 아직 공시되지 않았거나, 은행·증권·보험 같은 금융회사는 이 자료에 없을 수 있습니다). 직접 입력·CSV로 넣을 수 있습니다" }; // 응답은 왔지만 값이 빈 경우(실패가 아님)
     const parsed = Fundamentals.parseDataGoKrSummary(items, new Date().toISOString());
     if (parsed.summaries.length === 0) {
       return { ok: false, message: `응답에서 재무 항목을 읽지 못했습니다 (받은 항목: ${parsed.seen_fields.slice(0, 12).join(", ")}${parsed.missing.length ? ` / 못 찾은 항목: ${parsed.missing.join(", ")}` : ""})` };
@@ -2458,7 +2458,7 @@ async function fetchFundamentalsOne(marketKind, stockName) {
     at: new Date().toISOString(),
     key: holdingKey(marketKind, stockName),
     provider,
-    ok: Boolean(result.ok),
+    ok: Boolean(result.ok || result.empty),
     years: result.years || 0,
     added: result.added || 0,
     profile: Boolean(result.profile),
@@ -2596,8 +2596,10 @@ async function fetchFundamentalsAll() {
   const holdingsAll = computeHoldings(loadTransactions()).filter((h) => symbols[holdingKey(h.market_kind, h.stock_name)]);
   const fromLog = holdingsAll.filter((h) => todayFundLog(holdingKey(h.market_kind, h.stock_name))).length; // 오늘 이미 받은 종목은 다시 받지 않고 기록으로 대신한다
   const fundSkipped = holdingsAll.filter((h) => Fundamentals.isFundLike(h.stock_name)).length; // ETF·ETN 은 재무가 없어 받지 않는다(BL-42)
+  const isFinancialStock = (h) => FundSignals.resolveFundProfile({ stock_name: h.stock_name, industry_name: Fundamentals.profileView(loadProfiles()[holdingKey(h.market_kind, h.stock_name)]).industry_name || "", override: (loadStockInfo()[holdingKey(h.market_kind, h.stock_name)] || {}).fund_profile_kind }).kind === "financial";
   const targets = holdingsAll
     .filter((h) => !Fundamentals.isFundLike(h.stock_name))
+    .filter((h) => !isFinancialStock(h)) // 금융업은 재무 점검 대상이 아니라 일괄 받기에서 뺀다(BL-59). 상세의 '기업 정보 받기'로는 받을 수 있다
     .filter((h) => !recently(holdingKey(h.market_kind, h.stock_name)) && !todayFundLog(holdingKey(h.market_kind, h.stock_name)))
     .sort((a, b) => (a.market_kind === b.market_kind ? 0 : a.market_kind === "kr" ? -1 : 1));
   const failed = [];
@@ -2706,7 +2708,7 @@ function setupFundamentals() {
       const after = statusOf(key);
       if (after) {
         after.textContent = result.ok
-          ? (result.years > 0 ? `기업 정보 ${result.years}개 연도를 받았습니다 (새 연도 ${result.added}건)` : "기업 소개만 받았습니다 (재무는 받지 못했습니다)") + (result.profile ? " · 기업 소개 반영" : "") + (result.problems.length ? ` · 일부 실패: ${result.problems[0]}` : "")
+          ? (result.years > 0 ? `기업 정보 ${result.years}개 연도를 받았습니다 (새 연도 ${result.added}건)` : (result.profile ? "기업 소개만 받았습니다" : "받은 재무가 없습니다") + ` (재무는 받지 못했습니다${result.message ? ": " + result.message : ""})`) + (result.profile ? " · 기업 소개 반영" : "") + (result.problems.length ? ` · 일부 실패: ${result.problems[0]}` : "")
           : `받지 못했습니다: ${result.message}`;
       }
       return;
