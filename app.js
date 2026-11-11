@@ -1019,7 +1019,9 @@ function loadHoldingsView() {
 }
 
 let holdingsView = loadHoldingsView();
-const openHoldingKeys = new Set(); // 펼쳐 둔 종목(화면을 다시 그려도 유지)
+let stockDetailKey = ""; // 지금 보고 있는(또는 마지막으로 본) 종목 상세의 종목 키
+let holdingsListScroll = null; // 종목 목록에서 상세로 갈 때의 스크롤 위치(돌아오면 되돌린다)
+const latestStock = { rowsByKey: new Map(), ctx: null }; // 마지막으로 그린 종목 분석 행과 계산 묶음(상세 화면이 읽는다)
 const collapsedGroupIds = new Set(); // 접어 둔 그룹
 
 function saveHoldingsView() {
@@ -1280,7 +1282,8 @@ function summaryTrend(entries) {
   };
 }
 
-function holdingRowHtml(r, ctx) {
+// 종목 한 줄·종목 상세가 같이 쓰는 값(태그·비중·거래·배당·추이)을 한 번에 계산한다.
+function holdingLocals(r, ctx) {
   const key = escapeHtml(r.key);
   const market = r.h.market_kind;
   const tags = [
@@ -1311,9 +1314,13 @@ function holdingRowHtml(r, ctx) {
   const symbolPlaceholder = { kr: "예: 005930", us: "예: AAPL" }[market];
   const trend = summaryTrend(ctx.historyByKey[r.key] || []);
 
+  return { key, market, tags, share, trades, tradeHtml, div, exchangeOptions, symbolPlaceholder, trend };
+}
+
+// 한 줄 요약(목록 행과 상세 맨 위가 같이 씀)
+function holdingSummaryHtml(r, ctx) {
+  const { market, tags, trend } = holdingLocals(r, ctx);
   return `
-    <details class="holding-item" data-key="${key}" ${openHoldingKeys.has(r.key) ? "open" : ""}>
-      <summary class="holding-summary">
         <span class="hs-name holding-item-name">${escapeHtml(r.h.stock_name)}</span>
         <span class="hs-eval">${formatMoney(r.evaluation_amount, market)}</span>
         <span class="hs-tags">${tags}</span>
@@ -1323,11 +1330,74 @@ function holdingRowHtml(r, ctx) {
           ${trend.dayChange === null ? "" : `<span class="hs-day ${profitClass(trend.dayChange)}">전일비 ${formatPercent(trend.dayChange)}</span>`}
           ${trend.spark}
         </span>
-      </summary>
-      <div class="holding-body">
+  `;
+}
+
+// 종목 목록의 한 줄: 누르면 종목 상세 화면으로 간다(design/17 §3). 펼침 상세는 없다.
+function holdingRowHtml(r, ctx) {
+  const key = escapeHtml(r.key);
+  return `<div class="holding-item holding-row" data-key="${key}" data-action="open-stock" role="button" tabindex="0">
+    <div class="holding-summary">${holdingSummaryHtml(r, ctx)}</div>
+    <span class="hs-go" aria-hidden="true">›</span>
+  </div>`;
+}
+
+// 상세 화면의 한 묶음. 안이 비면 묶음 전체를 그리지 않는다.
+function stockSectionHtml(title, inner) {
+  return inner.replace(/\s+/g, "") ? `<section class="sd-section"><h3 class="sd-title">${title}</h3>${inner}</section>` : "";
+}
+
+// 종목 상세 화면(별도 화면, design/17 §3): 요약 → 판단 → 시세 → 재무·기업 → 내 기록 → 데이터
+function stockDetailHtml(r, ctx) {
+  const { key, market, share, trades, tradeHtml, div, exchangeOptions, symbolPlaceholder } = holdingLocals(r, ctx);
+  const judge = `
+        ${signalSectionHtml(r, ctx)}
+        ${marketStatusSectionHtml(r)}
+  `;
+  const chart = `
+        <div class="hd-section">
+          <div class="hd-title">가격 추이 <span class="hd-note">(저장된 시세 ${(ctx.historyByKey[r.key] || []).length}일)</span>
+            <button type="button" class="fetch-btn" data-action="backfill-one" data-key="${key}">과거 시세 채우기</button>
+          </div>
+          ${priceChartHtml(ctx.historyByKey[r.key] || [], r.h.average_price, market, Signals.trailingStopSeries(ctx.historyByKey[r.key] || [], ctx.signalSettings.trail_lookback_days, ctx.signalSettings.trail_atr_multiple, ctx.atrPeriod), chartMaSpecs().filter((m) => chartLayersOn.has(m.period)).map((m) => ({ ...m, points: Signals.smaSeries(ctx.historyByKey[r.key] || [], m.period) })), maToggleHtml())}
+          ${rsiChartHtml(ctx.historyByKey[r.key] || [], Signals.rsiSeries(ctx.historyByKey[r.key] || [], ctx.signalSettings.rsi_period), ctx.signalSettings)}
+        </div>
+  `;
+  const fund = `
+        ${fundamentalsSectionHtml(r, ctx)}
+  `;
+  const mine = `
         <div class="holding-item-detail">
           <span>수량 ${formatQty(r.h.holding_quantity)} · 평균단가 ${formatMoney(r.h.average_price, market)}</span>
         </div>
+        <div class="holding-item-detail">
+          <span>평가금액 ${formatMoney(r.evaluation_amount, market)}</span>
+          <span class="${profitClass(r.profit_amount)}">${formatMoney(r.profit_amount, market)} (${formatPercent(r.profit_rate)})</span>
+        </div>
+        <div class="holding-item-detail"><span>${MARKET_LABEL[market]} 비중 ${share}%</span></div>
+        <div class="holding-item-price-row">
+          <span>거래소</span>
+          <select class="info-select" data-action="exchange-select" data-key="${key}">${exchangeOptions}</select>
+        </div>
+        <div class="holding-item-price-row">
+          <span>섹터</span>
+          <span class="sector-edit">
+            <select class="info-select" data-action="sector-select" data-key="${key}">${sectorOptionsHtml(ctx.sectorChoices, r.sector_name)}</select>
+            <input class="info-input" type="text" list="sector-list" data-action="sector-input" data-key="${key}" placeholder="새 섹터 이름" hidden />
+          </span>
+        </div>
+        ${styleRowHtml(r)}
+        ${r.holding_style_kind === "trade" ? alertSectionHtml(r, ctx.alertRules[r.key]) : alertOffNoteHtml()}
+        <div class="hd-section">
+          <div class="hd-title">거래내역 ${trades.length}건 <span class="hd-note">(수정·삭제는 거래 탭에서)</span></div>
+          <ul class="hd-list">${tradeHtml}</ul>
+          ${trades.length > 5 ? `<div class="hd-note">외 ${trades.length - 5}건</div>` : ""}
+        </div>
+        <div class="hd-section">
+          <div class="hd-title">배당 ${div.count}건${div.count > 0 ? ` · 합계 ${formatMoney(div.total, market)}` : ""}</div>
+        </div>
+  `;
+  const data = `
         <div class="holding-item-symbol-row">
           <span>시세 코드</span>
           <div class="symbol-input-group">
@@ -1340,44 +1410,18 @@ function holdingRowHtml(r, ctx) {
           <span>현재가</span>
           <input class="price-input" type="number" step="any" min="0" data-action="price-input" data-key="${key}" value="${r.currentPrice || ""}" />
         </div>
-        <div class="holding-item-detail">
-          <span>평가금액 ${formatMoney(r.evaluation_amount, market)}</span>
-          <span class="${profitClass(r.profit_amount)}">${formatMoney(r.profit_amount, market)} (${formatPercent(r.profit_rate)})</span>
-        </div>
-        <div class="holding-item-price-row">
-          <span>거래소</span>
-          <select class="info-select" data-action="exchange-select" data-key="${key}">${exchangeOptions}</select>
-        </div>
-        <div class="holding-item-price-row">
-          <span>섹터</span>
-          <span class="sector-edit">
-            <select class="info-select" data-action="sector-select" data-key="${key}">${sectorOptionsHtml(ctx.sectorChoices, r.sector_name)}</select>
-            <input class="info-input" type="text" list="sector-list" data-action="sector-input" data-key="${key}" placeholder="새 섹터 이름" hidden />
-          </span>
-        </div>
-        <div class="holding-item-detail"><span>${MARKET_LABEL[market]} 비중 ${share}%</span></div>
-        ${styleRowHtml(r)}
-        ${r.holding_style_kind === "trade" ? alertSectionHtml(r, ctx.alertRules[r.key]) : alertOffNoteHtml()}
-        ${signalSectionHtml(r, ctx)}
-        ${marketStatusSectionHtml(r)}
-        ${fundamentalsSectionHtml(r, ctx)}
-        <div class="hd-section">
-          <div class="hd-title">거래내역 ${trades.length}건 <span class="hd-note">(수정·삭제는 거래 탭에서)</span></div>
-          <ul class="hd-list">${tradeHtml}</ul>
-          ${trades.length > 5 ? `<div class="hd-note">외 ${trades.length - 5}건</div>` : ""}
-        </div>
-        <div class="hd-section">
-          <div class="hd-title">가격 추이 <span class="hd-note">(저장된 시세 ${(ctx.historyByKey[r.key] || []).length}일)</span>
-            <button type="button" class="fetch-btn" data-action="backfill-one" data-key="${key}">과거 시세 채우기</button>
-          </div>
-          ${priceChartHtml(ctx.historyByKey[r.key] || [], r.h.average_price, market, Signals.trailingStopSeries(ctx.historyByKey[r.key] || [], ctx.signalSettings.trail_lookback_days, ctx.signalSettings.trail_atr_multiple, ctx.atrPeriod), chartMaSpecs().filter((m) => chartLayersOn.has(m.period)).map((m) => ({ ...m, points: Signals.smaSeries(ctx.historyByKey[r.key] || [], m.period) })), maToggleHtml())}
-          ${rsiChartHtml(ctx.historyByKey[r.key] || [], Signals.rsiSeries(ctx.historyByKey[r.key] || [], ctx.signalSettings.rsi_period), ctx.signalSettings)}
-        </div>
-        <div class="hd-section">
-          <div class="hd-title">배당 ${div.count}건${div.count > 0 ? ` · 합계 ${formatMoney(div.total, market)}` : ""}</div>
-        </div>
-      </div>
-    </details>`;
+  `;
+  return `<div class="holding-item stock-detail" data-key="${key}">
+    <div class="sd-head"><button type="button" class="fetch-btn" data-action="stock-back">← 종목 목록</button></div>
+    <div class="holding-summary sd-summary">${holdingSummaryHtml(r, ctx)}</div>
+    <div class="holding-body">
+      ${stockSectionHtml("판단", judge)}
+      ${stockSectionHtml("시세", chart)}
+      ${stockSectionHtml("재무·기업", fund)}
+      ${stockSectionHtml("내 기록", mine)}
+      ${stockSectionHtml("데이터", data)}
+    </div>
+  </div>`;
 }
 
 function renderHoldingsToolbar(allRows, shownCount) {
@@ -1431,9 +1475,12 @@ function renderHoldings(holdings, prices, symbols, info = {}, transactions = [],
     r.combined = v.combined;
   });
 
+  latestStock.rowsByKey = new Map(allRows.map((r) => [r.key, r]));
   if (allRows.length === 0) {
     holdingsArea.innerHTML = '<p class="empty-message">아직 보유 중인 종목이 없습니다.</p>';
     renderHoldingsToolbar(allRows, 0);
+    latestStock.ctx = null;
+    if (currentScreenId() === "stock") renderStockDetail();
     return;
   }
 
@@ -1460,6 +1507,8 @@ function renderHoldings(holdings, prices, symbols, info = {}, transactions = [],
     a.localeCompare(b, "ko")
   );
   const ctx = { marketTotals, tradesByKey, dividendByKey, sectorChoices, historyByKey: historyMap, signalSettings, atrPeriod, alertRules: loadAlertRules(), weightOver: computeWeightOver(allRows), fundMap: fundMapAll, valHistory: loadValuations(), profiles: loadProfiles(), sharesMap: loadListedShares(), corpIds: loadCorpIds() };
+  latestStock.ctx = ctx;
+  if (currentScreenId() === "stock") renderStockDetail(); // 상세를 보는 중이면 값이 바뀐 대로 다시 그린다
 
   const groups = groupHoldingRows(rows, holdingsView);
   const sectorOptions = [...new Set(allRows.map((r) => r.sector_name).filter(Boolean))]
@@ -1785,7 +1834,7 @@ function setupBackfill() {
     }
   });
   // 종목 상세의 '과거 시세 채우기'(한 종목)
-  document.getElementById("holdings-area").addEventListener("click", async (event) => {
+  onHoldingsArea("click", async (event) => {
     const btn = event.target.closest('[data-action="backfill-one"]');
     if (!btn || backfillRunning) return;
     const { market_kind, stock_name } = splitHoldingKey(btn.dataset.key);
@@ -1807,32 +1856,49 @@ function setupBackfill() {
 }
 
 // 보유 화면만 다시 그린다(검색·필터를 바꿀 때).
-// 보유 화면의 그 종목으로 간다(BL-44, design/02 §7): 종목을 펼치고, 필터·접힌 그룹 때문에 안 보이면 풀고, 그 자리로 스크롤한다.
-// 알림 배너·재무 점검의 '보기'가 모두 이것을 쓴다(화면을 바꾸면 스크롤이 맨 위로 돌아가기 때문에 직접 이동해야 한다).
-function findHoldingEl(key) {
-  return [...document.querySelectorAll("#holdings-area .holding-item")].find((e) => e.dataset.key === key) || null;
+// 목록과 상세 두 곳에 같은 이벤트 처리를 건다(상세의 입력·버튼이 목록 때와 똑같이 동작하도록, design/17 §3)
+function holdingsAreas() {
+  return ["holdings-area", "stock-detail-area"].map((id) => document.getElementById(id)).filter(Boolean);
+}
+function onHoldingsArea(type, handler, options) {
+  holdingsAreas().forEach((el) => el.addEventListener(type, handler, options));
+}
+const holdingsAreaProxy = { addEventListener: onHoldingsArea };
+
+// 종목 상세 화면을 그린다. 종목 분석 결과와 계산 묶음은 마지막 renderHoldings 가 남긴 것을 쓴다.
+function renderStockDetail() {
+  const area = document.getElementById("stock-detail-area");
+  if (!area) return;
+  if (!stockDetailKey) {
+    area.innerHTML = "";
+    return;
+  }
+  const r = latestStock.rowsByKey.get(stockDetailKey);
+  if (!r || !latestStock.ctx) {
+    area.innerHTML = '<div class="sd-head"><button type="button" class="fetch-btn" data-action="stock-back">← 종목 목록</button></div><p class="empty-message">이 종목은 지금 보유 목록에 없습니다.</p>';
+    return;
+  }
+  area.innerHTML = stockDetailHtml(r, latestStock.ctx);
+}
+
+// 종목 상세 화면으로 간다(BL-47). 알림 배너·재무 점검의 '보기'와 종목 목록의 줄이 모두 이것을 쓴다.
+function openStock(key) {
+  // 이미 이 종목의 상세를 보고 있으면 다시 그리지 않는다(입력 중인 칸·펼친 안내가 사라지지 않게)
+  const detailArea = document.getElementById("stock-detail-area");
+  if (currentScreenId() === "stock" && stockDetailKey === key && detailArea && detailArea.firstElementChild) return latestStock.rowsByKey.has(key);
+  if (currentScreenId() === "holdings") holdingsListScroll = document.getElementById("screen-area").scrollTop;
+  stockDetailKey = key;
+  renderStockDetail();
+  showScreen("stock", { stockKey: key });
+  return latestStock.rowsByKey.has(key);
 }
 function goToHolding(key) {
-  openHoldingKeys.add(key);
-  showScreen("holdings");
-  renderHoldingsOnly();
-  let el = findHoldingEl(key);
-  if (!el) {
-    // 시장·시그널 필터나 검색어 때문에 가려져 있으면 필터를 푼다
-    holdingsView = { ...holdingsView, market_filter: "all", exchange_filter: "all", sector_filter: "all", signal_filter: "all", search_text: "" };
-    saveHoldingsView();
-    renderHoldingsOnly();
-    el = findHoldingEl(key);
-  }
-  if (!el) return false;
-  const group = el.closest(".holding-group");
-  if (group) {
-    collapsedGroupIds.delete(group.dataset.group);
-    group.open = true;
-  }
-  el.open = true;
-  el.scrollIntoView({ block: "start" });
-  return true;
+  return openStock(key);
+}
+// 상세에서 목록으로: 앱 안에서 왔으면 뒤로가기(스크롤 위치도 돌아옴), 주소로 바로 열었으면 목록 화면으로
+function stockBack() {
+  if (history.state && history.state.fromApp) history.back();
+  else showScreen("holdings");
 }
 
 function renderHoldingsOnly() {
@@ -1841,6 +1907,19 @@ function renderHoldingsOnly() {
 
 function setupHoldingsView() {
   const toolbar = document.getElementById("holdings-toolbar");
+  const listArea = document.getElementById("holdings-area");
+  // 종목 줄을 누르면 종목 상세 화면으로 간다(줄 안의 ? 버튼 같은 단추는 제외)
+  listArea.addEventListener("click", (event) => {
+    const row = event.target.closest(".holding-row");
+    if (!row || event.target.closest("button, a, input, select, textarea")) return;
+    openStock(row.dataset.key);
+  });
+  listArea.addEventListener("keydown", (event) => {
+    if ((event.key === "Enter" || event.key === " ") && event.target.classList && event.target.classList.contains("holding-row")) {
+      event.preventDefault();
+      openStock(event.target.dataset.key);
+    }
+  });
   toolbar.addEventListener("click", (event) => {
     if (!event.target.closest('[data-action="hv-reset"]')) return;
     holdingsView = { ...holdingsView, market_filter: "all", exchange_filter: "all", sector_filter: "all", signal_filter: "all", search_text: "" };
@@ -1872,14 +1951,11 @@ function setupHoldingsView() {
     renderHoldingsOnly();
   });
   // 그룹·종목을 접고 펼친 상태를 기억해서 화면을 다시 그려도 유지한다.
-  document.getElementById("holdings-area").addEventListener(
+  onHoldingsArea(
     "toggle",
     (event) => {
       const el = event.target;
-      if (el.classList.contains("holding-item")) {
-        if (el.open) openHoldingKeys.add(el.dataset.key);
-        else openHoldingKeys.delete(el.dataset.key);
-      } else if (el.classList.contains("holding-group")) {
+      if (el.classList.contains("holding-group")) {
         if (el.open) collapsedGroupIds.delete(el.dataset.group);
         else collapsedGroupIds.add(el.dataset.group);
       }
@@ -2417,7 +2493,7 @@ async function fetchFundamentalsTwelve(stockName) {
   const profileSaved = saveAutoProfile(key, got.profile ? Fundamentals.parseTwelveProfile(got.profile, new Date().toISOString()) : null);
   if (parsed.summaries.length === 0 && !parsed.valuation && !profileSaved) {
     if (problems.some((p) => /exclusively|plan|upgrade|subscription/i.test(p))) {
-      return { ok: false, message: "Twelve Data 무료 플랜은 재무·기업 정보를 제공하지 않습니다. 보유 화면의 '기업 정보 관리'에 Alpha Vantage 무료 키를 넣으면 미국 재무를 받을 수 있습니다(직접 입력·CSV도 가능)" };
+      return { ok: false, message: "Twelve Data 무료 플랜은 재무·기업 정보를 제공하지 않습니다. 종목 화면의 '기업 정보 관리'에 Alpha Vantage 무료 키를 넣으면 미국 재무를 받을 수 있습니다(직접 입력·CSV도 가능)" };
     }
     return { ok: false, message: problems[0] || "받은 정보가 없습니다" };
   }
@@ -2519,7 +2595,7 @@ function setupFundamentals() {
   const avInput = document.getElementById("fund-api-key-input");
   avInput.value = loadFundApiKey();
   avInput.addEventListener("change", () => saveFundApiKey(avInput.value.trim()));
-  const area = document.getElementById("holdings-area");
+  const area = holdingsAreaProxy;
   const statusOf = (key) => [...document.querySelectorAll(".fund-status")].find((e) => e.dataset.key === key);
 
   area.addEventListener("click", async (event) => {
@@ -2551,7 +2627,6 @@ function setupFundamentals() {
       if (status) status.textContent = market_kind === "us" ? (usesAv ? `기업 정보를 받는 중... (손익·재무상태 ${AV_CALLS_PER_STOCK}번 조회, 약 15초)` : "기업 정보를 받는 중... (손익·재무상태·통계·소개 4번 조회, 약 30초)") : "기업 정보를 받는 중... (법인 확인 후 재무 조회)";
       fetchBtn.disabled = true;
       const result = await fetchFundamentalsOne(market_kind, stock_name);
-      openHoldingKeys.add(key);
       render();
       const after = statusOf(key);
       if (after) {
@@ -2586,7 +2661,6 @@ function setupFundamentals() {
       }
       const r = Fundamentals.upsertYear(loadFundamentals(), key, raw);
       saveFundamentals(r.map);
-      openHoldingKeys.add(key);
       render();
       const after = statusOf(key);
       if (after) after.textContent = `${raw.fiscal_year}년 ${r.added ? "추가" : "갱신"}했습니다.`;
@@ -2606,7 +2680,6 @@ function setupFundamentals() {
       else if (num.kind === "crno") ids[key] = { crno: num.value, corp_name: "(직접 입력)" };
       else ids[key] = { bzno: num.value, corp_name: "(사업자번호로 찾는 중)" }; // 사업자번호는 '기업 정보 받기' 때 맞는 법인을 찾아 법인등록번호로 바꾼다
       saveCorpIds(ids);
-      openHoldingKeys.add(key);
       render();
       const after = statusOf(key);
       if (after) after.textContent = num.kind === "empty" ? "번호를 지웠습니다(다음 조회 때 다시 찾습니다)." : num.kind === "crno" ? "법인등록번호를 저장했습니다. '기업 정보 받기'를 누르세요." : "사업자등록번호를 저장했습니다. '기업 정보 받기'를 누르면 이 번호의 법인을 찾아 연결합니다.";
@@ -2770,7 +2843,7 @@ async function handleProfileCsvImportFile(file) {
 }
 
 function setupProfiles() {
-  const area = document.getElementById("holdings-area");
+  const area = holdingsAreaProxy;
   area.addEventListener("click", (event) => {
     const save = event.target.closest('[data-action="profile-save"]');
     const clear = event.target.closest('[data-action="profile-clear"]');
@@ -2782,7 +2855,6 @@ function setupProfiles() {
       fields[el.dataset.profileField] = clear ? "" : el.value;
     });
     saveProfiles(Fundamentals.setProfileLayer(loadProfiles(), key, "manual", fields));
-    openHoldingKeys.add(key);
     render();
     const after = [...document.querySelectorAll(".profile-form")].find((f) => f.dataset.key === key);
     if (after) after.querySelector(".profile-status").textContent = clear ? "직접 입력을 지웠습니다." : "저장했습니다.";
@@ -2997,7 +3069,7 @@ function avCallsLeft() {
   return Math.max(0, AV_DAILY_LIMIT - loadAvUsage().count);
 }
 
-// 보유 화면 '기업 정보 관리'의 수집 기록(최근 12건)과 Alpha Vantage 오늘 사용량
+// 종목 화면 '기업 정보 관리'의 수집 기록(최근 12건)과 Alpha Vantage 오늘 사용량
 function renderFundLog() {
   const area = document.getElementById("fund-log-area");
   if (!area) return;
@@ -3026,7 +3098,7 @@ function renderFundCheck(holdings, views = null) {
   document.getElementById("fundcheck-count").innerHTML =
     `재무 수집 <strong>${sum.fund_collected_cnt}/${sum.fund_target_cnt}</strong>종목` +
     (sum.fund_excluded_cnt > 0 ? ` <span class="hd-note">(ETF ${sum.fund_excluded_cnt}종목 제외 ${glossaryBtn("etf")})</span>` : "") +
-    (sum.fund_missing_cnt > 0 ? ` <span class="hd-note">(${sum.fund_missing_cnt}종목은 기업 정보를 아직 받지 않았습니다. 보유 화면의 '기업 정보 관리'에서 받으세요)</span>` : "");
+    (sum.fund_missing_cnt > 0 ? ` <span class="hd-note">(${sum.fund_missing_cnt}종목은 기업 정보를 아직 받지 않았습니다. 종목 화면의 '기업 정보 관리'에서 받으세요)</span>` : "");
   if (sum.fund_summary_row_list.length === 0) {
     area.innerHTML = '<p class="empty-message">아직 보유 중인 종목이 없습니다.</p>';
     return;
@@ -3354,7 +3426,7 @@ function signalSectionHtml(r, ctx) {
   const lines = [];
   if (sig.signal_state === "insufficient") {
     lines.push(
-      `<div class="hd-note">시세 기록이 ${sig.metrics.rows_cnt}일뿐이라 판정할 수 없습니다 (최소 ${sig.needed_cnt}일 필요). 보유 화면 위쪽 '과거 시세 채우기'를 먼저 하세요.</div>`
+      `<div class="hd-note">시세 기록이 ${sig.metrics.rows_cnt}일뿐이라 판정할 수 없습니다 (최소 ${sig.needed_cnt}일 필요). 종목 화면 위쪽 '과거 시세 채우기'를 먼저 하세요.</div>`
     );
   } else {
     const reasonLis = [
@@ -3424,7 +3496,7 @@ function maToggleHtml() {
 }
 
 function setupSignalActions() {
-  document.getElementById("holdings-area").addEventListener("click", (event) => {
+  onHoldingsArea("click", (event) => {
     const chip = event.target.closest('[data-action="chart-ma"]');
     if (!chip) return;
     const period = Number(chip.dataset.layer);
@@ -3433,7 +3505,7 @@ function setupSignalActions() {
     saveChartLayers();
     renderHoldingsOnly();
   });
-  document.getElementById("holdings-area").addEventListener("change", (event) => {
+  onHoldingsArea("change", (event) => {
     const sel = event.target.closest('[data-action="style-select"]');
     if (!sel) return;
     updateStockInfo(sel.dataset.key, { holding_style_kind: sel.value === "trade" ? "trade" : "" });
@@ -3712,7 +3784,7 @@ function applyLevelChange(key, level, newPrice) {
 }
 
 function setupAlertActions() {
-  const holdingsArea = document.getElementById("holdings-area");
+  const holdingsArea = holdingsAreaProxy;
   const bannerArea = document.getElementById("alert-banner-area");
 
   holdingsArea.addEventListener("change", (event) => {
@@ -3984,7 +4056,7 @@ function splitHoldingKey(key) {
 }
 
 function setupHoldingsActions() {
-  const holdingsArea = document.getElementById("holdings-area");
+  const holdingsArea = holdingsAreaProxy;
 
   holdingsArea.addEventListener("change", (event) => {
     const priceInput = event.target.closest('[data-action="price-input"]');
@@ -4952,7 +5024,8 @@ const MORE_SCREEN_ID = "more";
 const LAST_SCREEN_KEY = "stockLastScreen_v1";
 const SCREENS = [
   { id: "home", label: "현황", icon: "📊", pinned: true },
-  { id: "holdings", label: "보유", icon: "💼", pinned: true },
+  { id: "holdings", label: "종목", icon: "💼", pinned: true },
+  { id: "stock", label: "종목 상세", icon: "🔎", hidden: true }, // 메뉴·탭에는 없고 종목 목록·알림에서 들어온다(주소 #stock/종목키)
   { id: "trades", label: "거래", icon: "🧾", pinned: true },
   { id: "dividends", label: "배당 기록", icon: "💰" },
   { id: "data", label: "데이터 관리", icon: "💾" },
@@ -4967,7 +5040,7 @@ function getTabScreens() {
 
 function getMoreScreens() {
   const tabIds = new Set(getTabScreens().map((s) => s.id));
-  return SCREENS.filter((s) => !tabIds.has(s.id));
+  return SCREENS.filter((s) => !tabIds.has(s.id) && !s.hidden);
 }
 
 function currentScreenId() {
@@ -4997,32 +5070,61 @@ function renderNavigation() {
     .join("");
 }
 
+// 주소 끝(#...)을 화면과 종목으로 풀어 준다. 종목 상세는 stock/<종목키(인코딩)> 형태다.
+function parseScreenHash(hash) {
+  const m = String(hash || "").match(/^stock\/(.+)$/);
+  if (!m) return { id: hash, key: "" };
+  try {
+    return { id: "stock", key: decodeURIComponent(m[1]) };
+  } catch (e) {
+    return { id: "holdings", key: "" };
+  }
+}
+
 function showScreen(id, options = {}) {
   const { push = true } = options;
+  const parsed = parseScreenHash(id);
+  let stockKey = options.stockKey || "";
+  if (parsed.id === "stock") {
+    id = "stock";
+    stockKey = parsed.key || stockKey;
+  }
   const known = id === MORE_SCREEN_ID || SCREENS.some((s) => s.id === id);
   if (!known) id = SCREENS[0].id; // 알 수 없는 화면은 첫 화면으로
+  if (id === "stock") {
+    stockDetailKey = stockKey || stockDetailKey;
+    if (!stockDetailKey) id = "holdings"; // 종목이 없으면 목록으로
+  }
 
   document.querySelectorAll(".screen").forEach((el) => {
     el.hidden = el.dataset.screen !== id;
   });
   const screen = SCREENS.find((s) => s.id === id);
-  document.getElementById("screen-title").textContent = id === MORE_SCREEN_ID ? "더보기" : screen.label;
+  const title = id === MORE_SCREEN_ID ? "더보기" : id === "stock" ? splitHoldingKey(stockDetailKey).stock_name || "종목 상세" : screen.label;
+  document.getElementById("screen-title").textContent = title;
+  if (id === "stock") renderStockDetail();
 
   const tabIds = getTabScreens().map((s) => s.id);
-  const activeTab = tabIds.includes(id) ? id : MORE_SCREEN_ID; // 탭에 없는 화면이면 '더보기' 탭을 선택 상태로
+  const activeTab = tabIds.includes(id) ? id : id === "stock" ? "holdings" : MORE_SCREEN_ID; // 종목 상세는 '종목' 탭 아래, 탭에 없는 화면은 '더보기'
   document.querySelectorAll("#tab-bar .tab-btn").forEach((b) => {
     b.classList.toggle("active", b.dataset.tab === activeTab);
   });
 
-  document.getElementById("screen-area").scrollTop = 0;
+  const screenArea = document.getElementById("screen-area");
+  screenArea.scrollTop = 0;
+  if (id === "holdings" && holdingsListScroll !== null) {
+    screenArea.scrollTop = holdingsListScroll; // 상세에서 돌아오면 보던 자리로
+    holdingsListScroll = null;
+  }
   if (id === "settings" || id === MORE_SCREEN_ID) renderVersionInfo();
   try {
-    localStorage.setItem(LAST_SCREEN_KEY, id);
+    localStorage.setItem(LAST_SCREEN_KEY, id === "stock" ? "holdings" : id); // 다음에 열 때는 종목 상세 대신 목록부터
   } catch (e) {
     // 저장소를 못 쓰는 환경이면 기억만 건너뛴다
   }
-  if (push && location.hash !== "#" + id) {
-    history.pushState({ screen: id }, "", "#" + id);
+  const hashText = id === "stock" ? "stock/" + encodeURIComponent(stockDetailKey) : id;
+  if (push && location.hash !== "#" + hashText) {
+    history.pushState({ screen: id, fromApp: true }, "", "#" + hashText);
   }
 }
 
@@ -5032,6 +5134,7 @@ function setupNavigation() {
   document.addEventListener("click", (event) => {
     const go = event.target.closest("[data-screen-go]");
     if (go) showScreen(go.dataset.screenGo);
+    if (event.target.closest('[data-action="stock-back"]')) stockBack();
   });
   // 폰의 뒤로가기: 앱이 꺼지지 않고 이전 화면으로 돌아간다.
   window.addEventListener("popstate", () => {
@@ -5047,7 +5150,7 @@ function setupNavigation() {
     }
   }
   showScreen(first, { push: false });
-  history.replaceState({ screen: currentScreenId() }, "", "#" + currentScreenId());
+  history.replaceState({ screen: currentScreenId() }, "", "#" + (currentScreenId() === "stock" ? "stock/" + encodeURIComponent(stockDetailKey) : currentScreenId()));
 }
 
 // 앱 버전과 오프라인 저장본(서비스 워커 캐시)의 버전을 화면에 보여 준다.

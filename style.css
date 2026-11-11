@@ -1245,3 +1245,13 @@ details.help summary {
 .fundcheck-table td small { color: #94a3b8; }
 .fundcheck-row { cursor: pointer; }
 .fundcheck-reason td { white-space: normal; text-align: left; border-bottom: 1px solid #334155; padding-bottom: 6px; }
+
+/* ===== 종목 목록 줄과 종목 상세 화면 (design/17 §3, BL-47) ===== */
+.holding-row { position: relative; cursor: pointer; padding-right: 22px; }
+.holding-row:focus-visible { outline: 2px solid #60a5fa; outline-offset: -2px; }
+.holding-row .hs-go { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); color: #94a3b8; font-size: 1.3rem; pointer-events: none; }
+.stock-detail { padding: 0; border: 0; background: transparent; }
+.stock-detail .sd-head { padding: 4px 0 8px; }
+.stock-detail .sd-summary { display: grid; padding: 8px 10px; border: 1px solid #334155; border-radius: 10px; background: #0f172a; cursor: default; }
+.sd-section { margin-top: 12px; padding: 8px 10px; border: 1px solid #1e293b; border-radius: 10px; background: #0b1220; }
+.sd-title { margin: 0 0 6px; font-size: 0.95rem; color: #93c5fd; }
