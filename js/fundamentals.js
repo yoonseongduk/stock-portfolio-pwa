@@ -384,7 +384,7 @@
     out.seen_fields = Object.keys(item).slice(0, 40);
     if (item.enpHmpgUrl) out.website_url = clean(item.enpHmpgUrl, 200);
     if (item.enpRprFnm) out.ceo_name = clean(item.enpRprFnm, 80);
-    if (item.enpEstbDt) out.established_date = clean(item.enpEstbDt, 20);
+    if (item.enpEstbDt) out.established_date = clean(item.enpEstbDt, 20).replace(/^(\d{4})(\d{2})(\d{2})$/, "$1-$2-$3"); // NR-09: YYYYMMDD 로 오면 YYYY-MM-DD 로 바꾼다
     // 법인 등록 시장 구분: Y 유가증권, K 코스닥, N 코넥스, 그 밖(E 등)은 기타(비상장일 수 있음)
     if (item.corpRegMrktDcd) {
       out.market_code = clean(item.corpRegMrktDcd, 4);
