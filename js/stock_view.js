@@ -30,7 +30,8 @@
    * @param {{market_kind:string, stock_name:string, holding_quantity:number, average_price:number}} input.holding
    * @param {number} input.current_price
    * @param {string} [input.symbol_code]
-   * @param {{exchange_kind?:string, sector_name?:string, holding_style_kind?:string}} [input.info] 종목정보
+   * @param {{exchange_kind?:string, sector_name?:string, holding_style_kind?:string, fund_profile_kind?:string}} [input.info] 종목정보(fund_profile_kind 는 직접 고른 재무 업종 구분)
+   * @param {string} [input.industry_name] 기업 소개의 업종(재무 업종 구분 자동 판정에 쓴다)
    * @param {object[]} [input.history] 일별 시세 기록
    * @param {object[]} [input.fund_years] 연도별 재무 묶음
    * @param {{signal:object, atr_period:number, market:object, fund:object}} input.settings 계산 기준값
@@ -46,9 +47,10 @@
 
     const signal = Signals.computeSignal(history, s.signal, s.atr_period, { average_price: h.average_price });
     const market = MarketStatus.analyzeMarketStatus(history, input.today_iso, s.market, { marketKind: h.market_kind });
-    const health = FundSignals.assessHealth(fundYears, s.fund);
+    const fund_profile = FundSignals.resolveFundProfile({ stock_name: h.stock_name, industry_name: input.industry_name || "", override: info.fund_profile_kind });
+    const health = FundSignals.assessHealth(fundYears, s.fund, fund_profile.kind);
     // 거래정지 의심이면 시세 시그널은 쓰지 않는다(종합 판단에서 중립으로 본다)
-    const combined = FundSignals.combinedView(market.signals_unreliable ? "neutral" : signal.signal_state, health.health_state);
+    const combined = FundSignals.combinedView(market.signals_unreliable ? "neutral" : signal.signal_state, health.health_state, health);
     return {
       holding_key: input.holding_key,
       stock_name: h.stock_name,
@@ -66,6 +68,8 @@
       signal,
       market,
       health,
+      fund_profile_kind: fund_profile.kind,
+      fund_profile_source: fund_profile.source,
       combined,
     };
   }

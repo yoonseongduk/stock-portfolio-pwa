@@ -358,12 +358,13 @@ function calc(h, currentPrice) {
 function computeStockViews(holdings, prices, symbols, info) {
   const historyMap = loadPriceHistory();
   const fundMap = loadFundamentals();
+  const profileMap = loadProfiles();
   const settings = { signal: loadSignalSettings(), atr_period: loadAlertSettings().atr_period, market: loadMarketSettings(), fund: loadFundSignalSettings() };
   const today = todayISO();
   return StockView.buildStockViews(
     holdings.map((h) => {
       const key = holdingKey(h.market_kind, h.stock_name);
-      return { holding_key: key, holding: h, current_price: prices[key] || 0, symbol_code: (symbols || {})[key] || "", info: (info || {})[key] || {}, history: historyMap[key], fund_years: Fundamentals.yearsOf(fundMap, key) };
+      return { holding_key: key, holding: h, current_price: prices[key] || 0, symbol_code: (symbols || {})[key] || "", info: (info || {})[key] || {}, history: historyMap[key], fund_years: Fundamentals.yearsOf(fundMap, key), industry_name: Fundamentals.profileView(profileMap[key]).industry_name || "" };
     }),
     { settings, today_iso: today }
   );
@@ -1362,14 +1363,15 @@ function signalLineHtml(r) {
 
 // 재무 보기: 종목마다 부채비율·영업이익·재무 건강·근거 한 줄(위험한 종목이 위로). 수집 N/전체는 맨 위에(필터와 무관하게 전체 기준)
 function fundViewHtml(allRows, rows) {
-  const items = allRows.map((r) => ({ key: r.key, stock_name: r.h.stock_name, market_kind: r.h.market_kind, years: r.view.fund_years, health: r.health, is_fund_like: r.view.is_fund_like }));
+  const items = allRows.map((r) => ({ key: r.key, stock_name: r.h.stock_name, market_kind: r.h.market_kind, years: r.view.fund_years, health: r.health, is_fund_like: r.view.is_fund_like, fund_profile_kind: r.view.fund_profile_kind, missing_reason_text: fundMissingReason(r.key) }));
   const sum = FundSignals.buildFundSummary(items, loadFundSignalSettings());
   const shown = new Set(rows.map((r) => r.key));
   const growthText = (g) => (g === null ? "" : ` <small>(전년 ${g >= 0 ? "+" : ""}${(g * 100).toFixed(0)}%)</small>`);
   const head =
     `<div class="fund-count">재무 수집 <strong>${sum.fund_collected_cnt}/${sum.fund_target_cnt}</strong>종목` +
-    (sum.fund_excluded_cnt > 0 ? ` <span class="hd-note">(ETF ${sum.fund_excluded_cnt}종목 제외 ${glossaryBtn("etf")})</span>` : "") +
-    (sum.fund_missing_cnt > 0 ? ` <span class="hd-note">(${sum.fund_missing_cnt}종목은 기업 정보를 아직 받지 않았습니다. 위쪽 '기업 정보 관리'에서 받으세요)</span>` : "") +
+    (sum.fund_etf_cnt > 0 ? ` <span class="hd-note">(ETF ${sum.fund_etf_cnt}종목 제외 ${glossaryBtn("etf")})</span>` : "") +
+    (sum.fund_financial_cnt > 0 ? ` <span class="hd-note">(금융업 ${sum.fund_financial_cnt}종목 제외 ${glossaryBtn("fund_profile")})</span>` : "") +
+    (sum.fund_missing_cnt > 0 ? ` <span class="hd-note">(${sum.fund_missing_cnt}종목은 재무가 없습니다. 아래 줄의 이유를 보고 위쪽 '기업 정보 관리'에서 받거나 직접 입력하세요)</span>` : "") +
     `</div><p class="hint-text">보유 종목의 저장된 공시 재무로 계산한 참고 정보이며 투자 권유가 아닙니다. 위험한 종목이 위에 나옵니다.</p>`;
   const body = sum.fund_summary_row_list
     .filter((x) => shown.has(x.key))
@@ -2226,7 +2228,7 @@ function fundamentalsParts(r, ctx) {
   let body;
   let healthHtml = "";
   if (!latest) {
-    body = `<div class="hd-note">저장된 기업 정보가 없습니다. '기업 정보 받기'로 가져오거나 직접 입력·CSV로 넣을 수 있습니다.</div>${corpNote}`;
+    body = `<div class="hd-note">저장된 재무가 없습니다. ${escapeHtml(fundMissingReason(key))}. '기업 정보 받기'로 다시 가져오거나 직접 입력·CSV로 넣을 수 있습니다.</div>${corpNote}`;
   } else {
     const m = Fundamentals.deriveMetrics(latest);
     const withShares = [...list].reverse().find((s) => Number.isFinite(s.shares_count));
@@ -2293,9 +2295,29 @@ function fundamentalsParts(r, ctx) {
     fund: `<div class="hd-section fund-section">
     <div class="hd-title">기업 브리핑 ${glossaryBtn("fundamentals")} <span class="hd-note">결산 재무 · 참고용</span> ${fetchBtn}</div>
     <div class="fund-status hd-note" data-key="${keyAttr}"></div>
+    ${fundProfileRowHtml(r)}
     ${body}${form}
   </div>`,
   };
+}
+
+// 재무 업종 구분(일반·고부채 업종·금융업) 선택. 비워 두면 종목명·업종 글자로 자동 판정한다(design/13 §3-2).
+function fundProfileRowHtml(r) {
+  const kind = r.view ? r.view.fund_profile_kind : "general";
+  const manual = (loadStockInfo()[r.key] || {}).fund_profile_kind || "";
+  const opt = (v, label) => `<option value="${v}" ${manual === v ? "selected" : ""}>${label}</option>`;
+  const auto = FundSignals.FUND_PROFILE_LABEL[kind];
+  const note =
+    kind === "financial"
+      ? "금융업은 부채비율 기준이 맞지 않아 재무 건강을 판정하지 않습니다. 시세 시그널을 참고하세요."
+      : kind === "high_debt"
+        ? "고부채 업종 기준(부채비율 주의 400%·위험 800%)으로 판정합니다. 기준은 설정에서 바꿉니다."
+        : "일반 기준(부채비율 주의 200%·위험 400%)으로 판정합니다.";
+  return `<div class="holding-item-price-row fund-profile-row">
+    <span>재무 업종 구분 ${glossaryBtn("fund_profile")}</span>
+    <select class="info-select" data-action="fund-profile-select" data-key="${escapeHtml(r.key)}">${opt("", `자동 (${auto})`)}${opt("general", "일반")}${opt("high_debt", "고부채 업종")}${opt("financial", "금융업")}</select>
+  </div>
+  <div class="hd-note">${note}</div>`;
 }
 
 // ----- 미국: Twelve Data 에서 받기 -----
@@ -2440,7 +2462,7 @@ async function fetchFundamentalsOne(marketKind, stockName) {
     years: result.years || 0,
     added: result.added || 0,
     profile: Boolean(result.profile),
-    message: result.ok ? "" : String(result.message || ""),
+    message: String(result.message || ""), // 성공이어도 남긴다(법인은 찾았지만 재무 값이 비어 있는 경우 등, BL-58)
   });
   return result;
 }
@@ -3100,7 +3122,17 @@ function describeFundLog(e) {
   const parts = [];
   if (e.years > 0) parts.push(`${e.years}개 연도(새 연도 ${e.added || 0}건)`);
   if (e.profile) parts.push("기업 소개");
+  if (!(e.years > 0) && e.ok && e.message) parts.push(String(e.message).slice(0, 120)); // 재무 값이 비어 온 이유
   return parts.length ? parts.join(" · ") : "받은 항목 없음";
+}
+
+// 재무가 없는 종목에 마지막 수집 결과를 한 줄로 알려 준다(BL-58, design/13 §3-2). 기록이 없으면 아직 받지 않은 것이다.
+function fundMissingReason(key) {
+  const e = [...loadFundLog()].reverse().find((x) => x.key === key);
+  if (!e) return "아직 받지 않았습니다 (기업 정보 받기 필요)";
+  const when = `${localDateOf(e.at).slice(5)} ${localTimeOf(e.at)}`;
+  if (e.ok) return `받았지만 재무 값이 없습니다 (${when}${e.message ? " · " + String(e.message).slice(0, 80) : ""})`;
+  return `받기 실패 (${when} · ${String(e.message || "이유 없음").slice(0, 100)})`;
 }
 
 function loadAvUsage() {
@@ -3195,7 +3227,7 @@ function syncFundEvents(holdings, prices, views = null) {
     const key = holdingKey(h.market_kind, h.stock_name);
     const { list, val } = fundValuationFor(key, prices[key] || 0, fundMap, sharesMap);
     const ms = viewByKey.get(key).market;
-    return { key, years: list, zone: FundSignals.valuationZone(val, settings), halted: ms.halted, halt_text: ms.halted ? ms.items[0].text : "" };
+    return { key, years: list, fund_profile_kind: viewByKey.get(key).fund_profile_kind, zone: FundSignals.valuationZone(val, settings), halted: ms.halted, halt_text: ms.halted ? ms.items[0].text : "" };
   });
   const result = FundSignals.evaluateFundEvents(loadFundEvents(), items, settings, new Date().toISOString());
   if (result.changed) saveFundEvents(result.event_map);
@@ -3214,7 +3246,7 @@ function fundBadgesHtml(r) {
 // 종목 상세의 '재무 건강·종합 판단' 상자.
 function fundHealthHtml(r, ctx) {
   const h = r.health;
-  if (!h || h.health_state === "insufficient") return "";
+  if (!h || h.health_state === "insufficient" || h.health_state === "not_applicable") return ""; // 금융업은 재무 칸의 업종 구분 안내로 대신한다
   const reasons = h.reasons.map((x) => `<li class="fh-${x.tone}">${escapeHtml(x.text)}</li>`).join("");
   const c = r.combined;
   return `<div class="fund-health">
@@ -3274,7 +3306,7 @@ function setupFundSignals() {
   });
 }
 
-// 설정 화면의 재무 신호 기준값 10개(수정 영역). 비율 값은 화면에서 %로, 배수는 그대로.
+// 설정 화면의 재무 신호 기준값 13개(수정 영역). 비율 값은 화면에서 %로, 배수는 그대로.
 const FUND_SETTING_FIELDS = [
   { name: "growth_event_rate", label: "영업이익 급증·급감 기준 (%)", percent: true },
   { name: "growth_sales_rate", label: "매출 성장·감소 기준 (%)", percent: true },
@@ -3282,6 +3314,9 @@ const FUND_SETTING_FIELDS = [
   { name: "debt_ratio_warn", label: "부채비율 주의 (%, 초과)", percent: true },
   { name: "debt_ratio_danger", label: "부채비율 위험 (%, 초과)", percent: true },
   { name: "debt_jump_rate", label: "부채비율 급증 (%p 이상 증가)", percent: true },
+  { name: "debt_ratio_low_high", label: "고부채 업종 부채비율 낮음 (%, 이하)", percent: true },
+  { name: "debt_ratio_warn_high", label: "고부채 업종 부채비율 주의 (%, 초과)", percent: true },
+  { name: "debt_ratio_danger_high", label: "고부채 업종 부채비율 위험 (%, 초과)", percent: true },
   { name: "roe_good_rate", label: "ROE 양호 (%, 이상)", percent: true },
   { name: "pbr_low_ratio", label: "PBR 낮은 구간 (배 미만)" },
   { name: "per_low_ratio", label: "PER 낮은 구간 (배 미만)" },
@@ -3522,6 +3557,13 @@ function setupSignalActions() {
     const sel = event.target.closest('[data-action="style-select"]');
     if (!sel) return;
     updateStockInfo(sel.dataset.key, { holding_style_kind: sel.value === "trade" ? "trade" : "" });
+    render();
+  });
+
+  onHoldingsArea("change", (event) => {
+    const sel = event.target.closest('[data-action="fund-profile-select"]');
+    if (!sel) return;
+    updateStockInfo(sel.dataset.key, { fund_profile_kind: sel.value });
     render();
   });
 

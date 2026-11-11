@@ -16,7 +16,19 @@
     pbr_low_ratio: 1, // PBR 이 이 값 미만이면 낮은 구간
     per_low_ratio: 10, // PER 이 이 값 미만이면 낮은 구간
     per_high_ratio: 40, // PER 이 이 값 초과이면 높은 구간
+    debt_ratio_low_high: 2, // 고부채 업종의 부채비율 낮음 기준(200%)
+    debt_ratio_warn_high: 4, // 고부채 업종의 부채비율 주의 기준(400%)
+    debt_ratio_danger_high: 8, // 고부채 업종의 부채비율 위험 기준(800%)
   };
+
+  // 재무 업종 구분(design/13 §3-2): 종목명·업종 글자에 이 말이 들어 있으면 자동으로 그 구분으로 본다. 제외어는 먼저 지운 뒤 찾는다.
+  const FUND_PROFILE_KEYWORDS = {
+    financial: ["은행", "증권", "보험", "카드", "캐피탈", "금융", "저축"],
+    high_debt: ["전력", "가스", "통신", "텔레콤", "건설", "이앤씨", "조선", "오션", "중공업", "해운", "항공", "철도", "선박"],
+    exclude: ["건설기계"],
+  };
+  const FUND_PROFILE_KINDS = ["general", "high_debt", "financial"];
+  const FUND_PROFILE_LABEL = { general: "일반", high_debt: "고부채 업종", financial: "금융업" };
   // ===== 수정 영역 END =====
 
   const isNum = (v) => typeof v === "number" && Number.isFinite(v);
@@ -31,7 +43,29 @@
       }
     }
     if (out.debt_ratio_danger < out.debt_ratio_warn) out.debt_ratio_danger = out.debt_ratio_warn;
+    if (out.debt_ratio_danger_high < out.debt_ratio_warn_high) out.debt_ratio_danger_high = out.debt_ratio_warn_high;
     return out;
+  }
+
+  /** 업종 구분에 맞는 부채비율 기준(낮음·주의·위험). 고부채 업종이면 높은 기준을 쓴다. */
+  function debtThresholds(settings, profileKind) {
+    const s = mergeFundSettings(settings);
+    return profileKind === "high_debt" ? { low: s.debt_ratio_low_high, warn: s.debt_ratio_warn_high, danger: s.debt_ratio_danger_high } : { low: s.debt_ratio_low, warn: s.debt_ratio_warn, danger: s.debt_ratio_danger };
+  }
+
+  /**
+   * 재무 업종 구분을 정한다. 직접 고른 값이 있으면 그것, 없으면 종목명·업종 글자의 키워드로 자동, 못 찾으면 일반.
+   * @param {{stock_name?:string, industry_name?:string, override?:string}} input
+   * @returns {{kind:'general'|'high_debt'|'financial', source:'manual'|'auto'|'default'}}
+   */
+  function resolveFundProfile(input) {
+    const o = input || {};
+    if (FUND_PROFILE_KINDS.includes(o.override)) return { kind: o.override, source: "manual" };
+    let text = `${o.stock_name || ""} ${o.industry_name || ""}`;
+    FUND_PROFILE_KEYWORDS.exclude.forEach((w) => (text = text.split(w).join(" ")));
+    if (FUND_PROFILE_KEYWORDS.financial.some((w) => text.includes(w))) return { kind: "financial", source: "auto" };
+    if (FUND_PROFILE_KEYWORDS.high_debt.some((w) => text.includes(w))) return { kind: "high_debt", source: "auto" };
+    return { kind: "general", source: "default" };
   }
 
   const pct = (v) => `${v >= 0 ? "+" : ""}${(v * 100).toFixed(1)}%`;
@@ -48,46 +82,50 @@
     return { latest, prev: before && before.fiscal_year === latest.fiscal_year - 1 ? before : null };
   }
 
-  const HEALTH_LABEL = { good: "재무 양호", normal: "재무 보통", caution: "재무 주의", danger: "재무 위험", insufficient: "재무 정보 없음" };
+  const HEALTH_LABEL = { good: "재무 양호", normal: "재무 보통", caution: "재무 주의", danger: "재무 위험", insufficient: "재무 정보 없음", not_applicable: "재무 점검 제외" };
 
   /**
    * 재무 건강을 판정한다.
    * @param {object[]} years 연도별 재무 묶음(Fundamentals 형식)
-   * @returns {{health_state:string, reasons:{tone:'good'|'warn'|'danger', text:string}[], latest_year:number|null}}
+   * @param {string} [profileKind] 재무 업종 구분(general·high_debt·financial). financial 이면 판정하지 않는다(not_applicable).
+   * @returns {{health_state:string, reasons:{tone:'good'|'warn'|'danger', kind:'profit'|'growth'|'debt'|'capital', text:string}[], latest_year:number|null}}
    */
-  function assessHealth(years, settings) {
+  function assessHealth(years, settings, profileKind) {
     const s = mergeFundSettings(settings);
     const { latest, prev } = latestPair(years);
+    if (profileKind === "financial") return { health_state: "not_applicable", reasons: [], latest_year: latest ? latest.fiscal_year : null };
     if (!latest) return { health_state: "insufficient", reasons: [], latest_year: null };
+    const th = debtThresholds(s, profileKind);
     const reasons = [];
-    const add = (tone, text) => reasons.push({ tone, text });
+    const add = (tone, kind, text) => reasons.push({ tone, kind, text });
 
     if (isNum(latest.operating_profit_amount)) {
-      if (latest.operating_profit_amount > 0) add("good", `${latest.fiscal_year}년 영업이익 흑자`);
-      else if (prev && isNum(prev.operating_profit_amount) && prev.operating_profit_amount <= 0) add("danger", `영업적자 2년 연속(${prev.fiscal_year}·${latest.fiscal_year}년)`);
-      else add("warn", `${latest.fiscal_year}년 영업적자`);
+      if (latest.operating_profit_amount > 0) add("good", "profit", `${latest.fiscal_year}년 영업이익 흑자`);
+      else if (prev && isNum(prev.operating_profit_amount) && prev.operating_profit_amount <= 0) add("danger", "profit", `영업적자 2년 연속(${prev.fiscal_year}·${latest.fiscal_year}년)`);
+      else add("warn", "profit", `${latest.fiscal_year}년 영업적자`);
     }
-    if (isNum(latest.net_income_amount) && latest.net_income_amount < 0) add("warn", `${latest.fiscal_year}년 순적자`);
-    if (isNum(latest.total_equity_amount) && latest.total_equity_amount <= 0) add("danger", "자본잠식(자본총계가 0 이하)");
+    if (isNum(latest.net_income_amount) && latest.net_income_amount < 0) add("warn", "profit", `${latest.fiscal_year}년 순적자`);
+    if (isNum(latest.total_equity_amount) && latest.total_equity_amount <= 0) add("danger", "capital", "자본잠식(자본총계가 0 이하)");
 
     const debt = ratioOf(latest.total_liabilities_amount, latest.total_equity_amount);
     if (debt !== null) {
-      if (debt > s.debt_ratio_danger) add("danger", `부채비율 ${pct0(debt)}로 매우 높음(${pct0(s.debt_ratio_danger)} 초과)`);
-      else if (debt > s.debt_ratio_warn) add("warn", `부채비율 ${pct0(debt)}로 높음(${pct0(s.debt_ratio_warn)} 초과)`);
-      else if (debt <= s.debt_ratio_low) add("good", `부채비율 ${pct0(debt)}로 낮음`);
+      const tag = profileKind === "high_debt" ? "고부채 업종 기준 " : "";
+      if (debt > th.danger) add("danger", "debt", `부채비율 ${pct0(debt)}로 매우 높음(${tag}${pct0(th.danger)} 초과)`);
+      else if (debt > th.warn) add("warn", "debt", `부채비율 ${pct0(debt)}로 높음(${tag}${pct0(th.warn)} 초과)`);
+      else if (debt <= th.low) add("good", "debt", `부채비율 ${pct0(debt)}로 낮음`);
     }
     const roe = ratioOf(latest.net_income_amount, latest.total_equity_amount);
-    if (roe !== null && roe >= s.roe_good_rate) add("good", `ROE ${pct0(roe)}`);
-    else if (isNum(latest.net_income_amount) && isNum(latest.total_equity_amount) && latest.total_equity_amount > 0 && latest.net_income_amount < 0) add("warn", `ROE 음수(${pct(latest.net_income_amount / latest.total_equity_amount)})`);
+    if (roe !== null && roe >= s.roe_good_rate) add("good", "profit", `ROE ${pct0(roe)}`);
+    else if (isNum(latest.net_income_amount) && isNum(latest.total_equity_amount) && latest.total_equity_amount > 0 && latest.net_income_amount < 0) add("warn", "profit", `ROE 음수(${pct(latest.net_income_amount / latest.total_equity_amount)})`);
 
     if (prev) {
       const sg = growth(latest.sales_amount, prev.sales_amount);
-      if (sg !== null && sg >= s.growth_sales_rate) add("good", `매출 전년 대비 ${pct(sg)}`);
-      else if (sg !== null && sg <= -s.growth_sales_rate) add("warn", `매출 전년 대비 ${pct(sg)}`);
+      if (sg !== null && sg >= s.growth_sales_rate) add("good", "growth", `매출 전년 대비 ${pct(sg)}`);
+      else if (sg !== null && sg <= -s.growth_sales_rate) add("warn", "growth", `매출 전년 대비 ${pct(sg)}`);
       const og = growth(latest.operating_profit_amount, prev.operating_profit_amount);
       if (og !== null && isNum(latest.operating_profit_amount) && latest.operating_profit_amount > 0) {
-        if (og >= s.growth_event_rate) add("good", `영업이익 전년 대비 ${pct(og)}`);
-        else if (og <= -s.growth_event_rate) add("warn", `영업이익 전년 대비 ${pct(og)}`);
+        if (og >= s.growth_event_rate) add("good", "growth", `영업이익 전년 대비 ${pct(og)}`);
+        else if (og <= -s.growth_event_rate) add("warn", "growth", `영업이익 전년 대비 ${pct(og)}`);
       }
     }
     const count = (t) => reasons.filter((r) => r.tone === t).length;
@@ -102,8 +140,9 @@
    * 최신 연도와 전 연도(연속한 해)를 비교해 연도 이벤트를 만든다. 번호(id)는 종류와 연도로 정해져 같은 결과면 항상 같다.
    * @returns {{id:string, kind:string, text:string}[]}
    */
-  function yearEvents(years, settings) {
+  function yearEvents(years, settings, profileKind) {
     const s = mergeFundSettings(settings);
+    const th = debtThresholds(s, profileKind);
     const { latest, prev } = latestPair(years);
     if (!latest) return [];
     const fy = latest.fiscal_year;
@@ -125,7 +164,7 @@
       }
       const d1 = ratioOf(latest.total_liabilities_amount, latest.total_equity_amount);
       const d0 = ratioOf(prev.total_liabilities_amount, prev.total_equity_amount);
-      if (d1 !== null && d0 !== null && d1 >= s.debt_ratio_warn && d1 - d0 >= s.debt_jump_rate) {
+      if (profileKind !== "financial" && d1 !== null && d0 !== null && d1 >= th.warn && d1 - d0 >= s.debt_jump_rate) {
         out.push({ id: `debt_jump:${fy}`, kind: "debt_jump", text: `부채비율 급증 (${pct0(d0)} → ${pct0(d1)})` });
       }
     }
@@ -161,7 +200,7 @@
     const pending = [];
     let changed = false;
     for (const it of items) {
-      const events = yearEvents(it.years, s);
+      const events = yearEvents(it.years, s, it.fund_profile_kind);
       const hasData = events.length > 0;
       const before = next[it.key];
       let entry;
@@ -211,37 +250,49 @@
    * 시세 시그널과 재무 건강을 합친 한 줄 판단. 둘 중 하나가 없거나 중립이면 null.
    * @returns {{tone:'bad'|'good'|'warn'|'info', label:string, text:string}|null}
    */
-  function combinedView(signalState, healthState) {
+  function combinedView(signalState, healthState, health) {
     const down = signalState === "sell_review";
     const up = signalState === "buy_watch" || signalState === "rebound_watch";
     if (!down && !up) return null;
     if (!["good", "normal", "caution", "danger"].includes(healthState)) return null;
     const weak = healthState === "caution" || healthState === "danger";
+    // 나쁜 이유가 부채비율뿐이면(수익·성장·자본잠식 이유 없음) '실적 악화'라고 하지 않는다(BL-57)
+    const bad = health && Array.isArray(health.reasons) ? health.reasons.filter((r) => r.tone !== "good") : [];
+    const debtOnly = weak && bad.length > 0 && bad.every((r) => r.kind === "debt");
     if (down) {
+      if (debtOnly) return { tone: "warn", label: "재무 부담(부채) 동반 하락", text: "가격 하락에 부채 부담이 겹쳐 있습니다. 실적 쪽 문제는 보이지 않으니 부채·이자 부담과 업종 특성을 함께 보세요." };
       if (weak) return { tone: "bad", label: "실적 악화 동반 하락", text: "가격 하락에 실적·재무 악화가 겹쳐 있습니다. 정리 검토를 우선 살펴보세요." };
       if (healthState === "good") return { tone: "good", label: "가격만 하락", text: "가격은 약세지만 재무는 양호해 보유 근거는 유지됩니다. 지켜보기." };
       return { tone: "info", label: "재무 보통, 가격 약세", text: "재무는 보통이고 가격 흐름만 약세입니다." };
     }
+    if (debtOnly) return { tone: "warn", label: "부채 부담 속 반등", text: "반등 신호가 있지만 부채 부담이 큽니다. 실적 쪽 문제는 보이지 않습니다." };
     if (weak) return { tone: "warn", label: "재무 악화 속 반등", text: "반등 신호가 있지만 재무가 좋지 않아 위험이 큽니다." };
     if (healthState === "good") return { tone: "good", label: "재무가 받쳐 주는 반등", text: "반등·매수 관심 신호에 재무도 양호합니다." };
     return { tone: "info", label: "재무 보통", text: "반등·매수 관심 신호가 있고 재무는 보통입니다." };
   }
 
-  const HEALTH_RANK = { danger: 0, caution: 1, normal: 2, good: 3, insufficient: 4 };
+  const HEALTH_RANK = { danger: 0, caution: 1, normal: 2, good: 3, insufficient: 4, not_applicable: 5 };
   const TONE_RANK = { danger: 0, warn: 1, good: 2 };
 
   /**
    * 보유 종목 전체의 재무 점검 요약표를 만든다(BL-39, design/13 §3-1). 저장하지 않고 화면을 그릴 때 계산한다.
    * 정렬: 위험 → 주의 → 보통 → 양호 → 재무 없음, 같은 상태면 이름순.
-   * @param {{key:string, stock_name:string, market_kind:string, years:object[], is_fund_like?:boolean}[]} items 종목과 그 종목의 연도별 재무 묶음(ETF 등은 is_fund_like)
-   * @returns {{holding_cnt:number, fund_target_cnt:number, fund_excluded_cnt:number, fund_collected_cnt:number, fund_missing_cnt:number, fund_summary_row_list:object[]}}
+   * @param {{key:string, stock_name:string, market_kind:string, years:object[], is_fund_like?:boolean, fund_profile_kind?:string, missing_reason_text?:string}[]} items 종목과 그 종목의 연도별 재무 묶음(ETF 등은 is_fund_like, 금융업은 fund_profile_kind, 재무가 없을 때 이유는 missing_reason_text)
+   * @returns {{holding_cnt:number, fund_target_cnt:number, fund_excluded_cnt:number, fund_etf_cnt:number, fund_financial_cnt:number, fund_collected_cnt:number, fund_missing_cnt:number, fund_summary_row_list:object[]}}
    */
   function buildFundSummary(items, settings) {
     const fund_summary_row_list = (items || []).map((it) => {
-      const health = it.health || assessHealth(it.years, settings); // 종목 분석 모델이 이미 계산했으면 그것을 쓴다(BL-46)
+      const health = it.health || assessHealth(it.years, settings, it.fund_profile_kind); // 종목 분석 모델이 이미 계산했으면 그것을 쓴다(BL-46)
+      const isFinancial = health.health_state === "not_applicable";
       const { latest, prev } = latestPair(it.years);
       const sorted = [...health.reasons].sort((x, y) => TONE_RANK[x.tone] - TONE_RANK[y.tone]);
-      const reasonText = it.is_fund_like ? "ETF라 재무 없음" : latest ? sorted.slice(0, 2).map((r) => r.text).join(" · ") : "재무 없음 (기업 정보 받기 필요)";
+      const reasonText = it.is_fund_like
+        ? "ETF라 재무 없음"
+        : isFinancial
+          ? "금융업 — 부채비율 기준이 맞지 않아 재무 점검에서 제외"
+          : latest
+            ? sorted.slice(0, 2).map((r) => r.text).join(" · ")
+            : it.missing_reason_text || "재무 없음 (기업 정보 받기 필요)";
       return {
         key: it.key,
         stock_name: it.stock_name,
@@ -253,19 +304,27 @@
         operating_profit_growth_rate: latest && prev ? growth(latest.operating_profit_amount, prev.operating_profit_amount) : null,
         reason_text: reasonText || "특이 사항 없음",
         is_fund_like: Boolean(it.is_fund_like),
+        is_financial: isFinancial && !it.is_fund_like,
       };
     });
-    fund_summary_row_list.sort((x, y) => Number(x.is_fund_like) - Number(y.is_fund_like) || HEALTH_RANK[x.health_state] - HEALTH_RANK[y.health_state] || String(x.stock_name).localeCompare(String(y.stock_name), "ko"));
-    const excluded = fund_summary_row_list.filter((r) => r.is_fund_like).length;
+    const excludedOf = (r) => r.is_fund_like || r.is_financial;
+    fund_summary_row_list.sort((x, y) => Number(excludedOf(x)) - Number(excludedOf(y)) || HEALTH_RANK[x.health_state] - HEALTH_RANK[y.health_state] || String(x.stock_name).localeCompare(String(y.stock_name), "ko"));
+    const etf = fund_summary_row_list.filter((r) => r.is_fund_like).length;
+    const financial = fund_summary_row_list.filter((r) => r.is_financial).length;
+    const excluded = etf + financial;
     const target = fund_summary_row_list.length - excluded;
-    const collected = fund_summary_row_list.filter((r) => !r.is_fund_like && r.last_fiscal_year !== null).length;
-    return { holding_cnt: fund_summary_row_list.length, fund_target_cnt: target, fund_excluded_cnt: excluded, fund_collected_cnt: collected, fund_missing_cnt: target - collected, fund_summary_row_list };
+    const collected = fund_summary_row_list.filter((r) => !excludedOf(r) && r.last_fiscal_year !== null).length;
+    return { holding_cnt: fund_summary_row_list.length, fund_target_cnt: target, fund_excluded_cnt: excluded, fund_etf_cnt: etf, fund_financial_cnt: financial, fund_collected_cnt: collected, fund_missing_cnt: target - collected, fund_summary_row_list };
   }
 
   const api = {
     FUND_SIGNAL_DEFAULTS,
+    FUND_PROFILE_KEYWORDS,
+    FUND_PROFILE_LABEL,
     HEALTH_LABEL,
     mergeFundSettings,
+    debtThresholds,
+    resolveFundProfile,
     latestPair,
     assessHealth,
     yearEvents,

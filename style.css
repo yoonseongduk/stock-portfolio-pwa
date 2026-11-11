@@ -1207,6 +1207,8 @@ details.help summary {
 .fund-normal { background: #475569; }
 .fund-caution { background: #b45309; }
 .fund-danger { background: #b91c1c; }
+.fund-insufficient, .fund-not_applicable { background: #334155; }
+.fund-profile-row { margin-top: 6px; }
 .fund-bad { background: #7f1d1d; }
 .fund-event { background: #6d28d9; }
 .fund-health { background: #0b1220; border: 1px solid #1e293b; border-radius: 8px; padding: 8px; margin: 6px 0; }
