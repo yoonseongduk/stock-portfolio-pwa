@@ -3754,7 +3754,8 @@ function renderInbox(pending) {
   latestInbox.pending = pending;
   const box = Inbox.buildInbox(pending);
   if (box.inbox_total_cnt === 0) {
-    area.innerHTML = "";
+    // 알림이 없어도 얇은 한 줄은 보인다(없으면 기능이 있는지 알 수 없다)
+    area.innerHTML = `<div class="card inbox-card inbox-empty"><span class="hd-note">🔔 알림 없음 · 목표가·시세 시그널·기업 이벤트가 새로 생기면 여기에 모입니다</span></div>`;
     return;
   }
   const glossaryOf = { alert: "", signal: glossaryBtn("signal"), event: glossaryBtn("fund_health") };
