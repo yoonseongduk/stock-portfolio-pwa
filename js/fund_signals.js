@@ -227,6 +227,38 @@
     return { tone: "info", label: "재무 보통", text: "반등·매수 관심 신호가 있고 재무는 보통입니다." };
   }
 
+  const HEALTH_RANK = { danger: 0, caution: 1, normal: 2, good: 3, insufficient: 4 };
+  const TONE_RANK = { danger: 0, warn: 1, good: 2 };
+
+  /**
+   * 보유 종목 전체의 재무 점검 요약표를 만든다(BL-39, design/13 §3-1). 저장하지 않고 화면을 그릴 때 계산한다.
+   * 정렬: 위험 → 주의 → 보통 → 양호 → 재무 없음, 같은 상태면 이름순.
+   * @param {{key:string, stock_name:string, market_kind:string, years:object[]}[]} items 종목과 그 종목의 연도별 재무 묶음
+   * @returns {{holding_cnt:number, fund_collected_cnt:number, fund_missing_cnt:number, fund_summary_row_list:object[]}}
+   */
+  function buildFundSummary(items, settings) {
+    const fund_summary_row_list = (items || []).map((it) => {
+      const health = assessHealth(it.years, settings);
+      const { latest, prev } = latestPair(it.years);
+      const sorted = [...health.reasons].sort((x, y) => TONE_RANK[x.tone] - TONE_RANK[y.tone]);
+      const reasonText = latest ? sorted.slice(0, 2).map((r) => r.text).join(" · ") : "재무 없음 (기업 정보 받기 필요)";
+      return {
+        key: it.key,
+        stock_name: it.stock_name,
+        market_kind: it.market_kind,
+        health_state: health.health_state,
+        last_fiscal_year: health.latest_year,
+        debt_ratio_rate: latest ? ratioOf(latest.total_liabilities_amount, latest.total_equity_amount) : null,
+        operating_profit_amount: latest && isNum(latest.operating_profit_amount) ? latest.operating_profit_amount : null,
+        operating_profit_growth_rate: latest && prev ? growth(latest.operating_profit_amount, prev.operating_profit_amount) : null,
+        reason_text: reasonText || "특이 사항 없음",
+      };
+    });
+    fund_summary_row_list.sort((x, y) => HEALTH_RANK[x.health_state] - HEALTH_RANK[y.health_state] || String(x.stock_name).localeCompare(String(y.stock_name), "ko"));
+    const collected = fund_summary_row_list.filter((r) => r.last_fiscal_year !== null).length;
+    return { holding_cnt: fund_summary_row_list.length, fund_collected_cnt: collected, fund_missing_cnt: fund_summary_row_list.length - collected, fund_summary_row_list };
+  }
+
   const api = {
     FUND_SIGNAL_DEFAULTS,
     HEALTH_LABEL,
@@ -238,6 +270,7 @@
     evaluateFundEvents,
     acknowledgeEvents,
     combinedView,
+    buildFundSummary,
   };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.FundSignals = api;

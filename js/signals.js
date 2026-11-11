@@ -18,11 +18,13 @@
     trail_lookback_days: 60, // 추적 손절선의 기준 최고 종가를 찾는 기간
     trail_atr_multiple: 3, // 추적 손절선 = 최고 종가 - 배수 × ATR
     max_weight_rate: 0.2, // 한 종목 최대 비중(0~1)
+    rebound_min_reason_cnt: 2, // 반등 후보: RSI 되돌림이 없으면 매수 근거가 이 개수 이상이어야 한다 (BL-38)
+    rebound_profit_limit_rate: 0, // 반등 후보: 현재가가 평단보다 이 비율(0~1)을 넘게 높으면 제외한다. 0이면 이익 중인 종목은 모두 제외
   };
   // ===== 수정 영역 END =====
 
   const isNum = (v) => typeof v === "number" && Number.isFinite(v);
-  const INT_KEYS = ["sma_short_period", "sma_long_period", "cross_lookback_days", "rsi_period", "trail_lookback_days"];
+  const INT_KEYS = ["sma_short_period", "sma_long_period", "cross_lookback_days", "rsi_period", "trail_lookback_days", "rebound_min_reason_cnt"];
 
   /** 저장된 설정과 기본값을 합친다. 숫자가 아니거나 0 이하이면 기본값. 단기선이 장기선보다 길면 둘 다 기본값. */
   function mergeSignalSettings(saved) {
@@ -229,9 +231,10 @@
 
   /**
    * 종목 하나의 시세 시그널을 계산한다.
+   * @param {{average_price?:number}} [ctx] 평단을 알면 넘긴다. 평단 위(이익 중)인 종목은 반등 후보에서 뺀다(BL-38). 없으면 그 조건은 건너뛴다
    * @returns {{signal_state:string, buy_reasons:string[], sell_reasons:string[], metrics:object, needed_cnt:number}}
    */
-  function computeSignal(history, settings, atrPeriod) {
+  function computeSignal(history, settings, atrPeriod, ctx) {
     const s = mergeSignalSettings(settings);
     const atrN = atrPeriod || AlertRules.ALERT_DEFAULTS.atr_period;
     const rows = cleanRows(history);
@@ -278,8 +281,19 @@
     let state = "neutral";
     if (buy.length > 0 && sell.length === 0) state = "buy_watch";
     else if (sell.length > 0 && buy.length === 0) state = "sell_review";
-    else if (buy.length > 0 && sell.length > 0 && sellHot.length === 0) state = "rebound_watch";
+    else if (buy.length > 0 && sell.length > 0 && sellHot.length === 0 && isReboundWorthy(m, buy.length, s, ctx)) state = "rebound_watch";
     return { signal_state: state, buy_reasons: buy, sell_reasons: sell, metrics: m, needed_cnt: needed, mixed: buy.length > 0 && sell.length > 0 };
+  }
+
+  /**
+   * 반등 후보로 볼 만한가(BL-38, design/11 §2). ① RSI 되돌림이 있거나 매수 근거가 기준 개수 이상 ② 평단 위(이익 중)가 아님.
+   * 20일선 회복 하나만으로는 후보가 아니다. 평단을 모르면 ②는 건너뛴다.
+   */
+  function isReboundWorthy(m, buyCnt, s, ctx) {
+    if (!m.rsi_rebound && buyCnt < s.rebound_min_reason_cnt) return false;
+    const avg = ctx && ctx.average_price;
+    if (isNum(avg) && avg > 0 && isNum(m.current_price) && m.current_price > avg * (1 + s.rebound_profit_limit_rate)) return false;
+    return true;
   }
 
   const isActive = (st) => st === "buy_watch" || st === "sell_review" || st === "rebound_watch";
@@ -288,7 +302,7 @@
    * 보유 종목들의 시그널 상태를 갱신하고 새로 알릴 것을 골라낸다.
    * 처음 계산한 종목(또는 직전이 '데이터 부족'이던 종목)은 확인된 상태로 시작한다(처음 열었을 때 한꺼번에 뜨지 않게).
    * @param {Record<string, {signal_state:string, signal_ack_state:string, signal_updated_at:string}>} signalMap
-   * @param {{key:string}[]} holdings
+   * @param {{key:string, average_price?:number}[]} holdings
    * @param {Record<string, object[]>} historyMap
    */
   function evaluateSignals(signalMap, holdings, historyMap, settings, atrPeriod, nowIso) {
@@ -296,7 +310,7 @@
     const pending = [];
     let changed = false;
     for (const h of holdings) {
-      const result = computeSignal((historyMap || {})[h.key], settings, atrPeriod);
+      const result = computeSignal((historyMap || {})[h.key], settings, atrPeriod, { average_price: h.average_price });
       const state = result.signal_state;
       const before = next[h.key];
       let entry;

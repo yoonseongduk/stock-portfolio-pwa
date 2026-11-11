@@ -1239,3 +1239,9 @@ details.help summary {
 .fund-log-list li { font-size: 0.8rem; }
 .fl-ok { color: #cbd5e1; }
 .fl-fail { color: #fca5a5; }
+
+/* ===== 재무 점검 요약표 (design/13 §3-1, BL-39) ===== */
+.fundcheck-count { font-size: 0.95rem; margin-bottom: 4px; }
+.fundcheck-table td small { color: #94a3b8; }
+.fundcheck-row { cursor: pointer; }
+.fundcheck-reason td { white-space: normal; text-align: left; border-bottom: 1px solid #334155; padding-bottom: 6px; }

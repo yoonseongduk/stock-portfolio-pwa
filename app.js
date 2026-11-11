@@ -1407,7 +1407,7 @@ function renderHoldings(holdings, prices, symbols, info = {}, transactions = [],
   const signalSettings = loadSignalSettings();
   const historyMap = loadPriceHistory();
   const atrPeriod = loadAlertSettings().atr_period;
-  allRows.forEach((r) => (r.signal = Signals.computeSignal(historyMap[r.key], signalSettings, atrPeriod)));
+  allRows.forEach((r) => (r.signal = Signals.computeSignal(historyMap[r.key], signalSettings, atrPeriod, { average_price: r.h.average_price })));
   const fundMapAll = loadFundamentals();
   const fundSettings = loadFundSignalSettings();
   const marketSettings = loadMarketSettings();
@@ -2944,6 +2944,52 @@ function renderFundLog() {
 }
 // ===== 기업 정보 수집 기록 END =====
 
+// ===== 재무 점검 요약표 (BL-39, design/13 §3-1) =====
+// 보유 종목 전체의 재무 건강을 한 표로 모은다. 계산은 FundSignals.buildFundSummary(순수 함수), 저장하지 않는다.
+function renderFundCheck(holdings) {
+  const area = document.getElementById("fundcheck-area");
+  if (!area) return;
+  const fundMap = loadFundamentals();
+  const items = holdings.map((h) => {
+    const key = holdingKey(h.market_kind, h.stock_name);
+    return { key, stock_name: h.stock_name, market_kind: h.market_kind, years: Fundamentals.yearsOf(fundMap, key) };
+  });
+  const sum = FundSignals.buildFundSummary(items, loadFundSignalSettings());
+  document.getElementById("fundcheck-count").innerHTML =
+    `재무 수집 <strong>${sum.fund_collected_cnt}/${sum.holding_cnt}</strong>종목` +
+    (sum.fund_missing_cnt > 0 ? ` <span class="hd-note">(${sum.fund_missing_cnt}종목은 기업 정보를 아직 받지 않았습니다. 보유 화면의 '기업 정보 관리'에서 받으세요)</span>` : "");
+  if (sum.fund_summary_row_list.length === 0) {
+    area.innerHTML = '<p class="empty-message">아직 보유 중인 종목이 없습니다.</p>';
+    return;
+  }
+  const growthText = (g) => (g === null ? "" : ` <small>(전년 ${g >= 0 ? "+" : ""}${(g * 100).toFixed(0)}%)</small>`);
+  area.innerHTML = `<table class="fund-table fundcheck-table">
+    <thead><tr><th>종목</th><th>부채비율 ${glossaryBtn("debt_ratio")}</th><th>영업이익 ${glossaryBtn("operating_profit")}</th><th>재무 건강 ${glossaryBtn("fund_health")}</th></tr></thead>
+    <tbody>${sum.fund_summary_row_list
+      .map(
+        (r) => `<tr class="fundcheck-row" data-key="${escapeHtml(r.key)}">
+        <td>${escapeHtml(r.stock_name)}<small> ${r.market_kind === "kr" ? "국내" : "미국"}${r.last_fiscal_year ? ` · ${r.last_fiscal_year}년` : ""}</small></td>
+        <td>${fmtRate(r.debt_ratio_rate)}</td>
+        <td>${r.operating_profit_amount === null ? "-" : fmtBig(r.operating_profit_amount, r.market_kind)}${growthText(r.operating_profit_growth_rate)}</td>
+        <td><span class="fund-badge fund-${r.health_state}">${FundSignals.HEALTH_LABEL[r.health_state]}</span></td></tr>
+        <tr class="fundcheck-reason" data-key="${escapeHtml(r.key)}"><td colspan="4" class="hd-note">${escapeHtml(r.reason_text)}</td></tr>`
+      )
+      .join("")}</tbody></table>`;
+}
+
+function setupFundCheck() {
+  const area = document.getElementById("fundcheck-area");
+  area.addEventListener("click", (event) => {
+    if (event.target.closest("[data-glossary]")) return; // ? 버튼은 용어집이 처리한다
+    const row = event.target.closest("tr[data-key]");
+    if (!row) return;
+    openHoldingKeys.add(row.dataset.key);
+    showScreen("holdings");
+    renderHoldingsOnly();
+  });
+}
+// ===== 재무 점검 요약표 END =====
+
 // ===== 재무 건강·기업 이벤트·종합 판단 (design/13_재무시그널과기업이벤트.md) =====
 // 계산은 js/fund_signals.js(FundSignals)가 하고, 여기서는 저장·화면·이벤트만 이어 준다.
 const FUND_EVENTS_KEY = "stockFundEvents_v2"; // fund_event_map: holding_key -> 이벤트 상태
@@ -3172,7 +3218,7 @@ function holdingStyleOf(info, key) {
 
 // 보유 종목의 시그널 상태를 갱신하고 새로 알릴 것을 돌려준다. 바뀌었을 때만 저장한다.
 function syncSignals(holdings) {
-  const keyed = holdings.map((h) => ({ key: holdingKey(h.market_kind, h.stock_name) }));
+  const keyed = holdings.map((h) => ({ key: holdingKey(h.market_kind, h.stock_name), average_price: h.average_price }));
   const result = Signals.evaluateSignals(
     loadSignalMap(),
     keyed,
@@ -3354,7 +3400,7 @@ function setupSignalActions() {
   });
 }
 
-// 설정 화면의 시그널 산식 상수 9개(수정 영역). 퍼센트 값은 화면에서는 %로, 저장은 소수로 한다.
+// 설정 화면의 시그널 산식 상수 11개(수정 영역). 퍼센트 값은 화면에서는 %로, 저장은 소수로 한다.
 const SIGNAL_SETTING_FIELDS = [
   { name: "sma_short_period", label: "단기 이동평균 (거래일)" },
   { name: "sma_long_period", label: "장기 이동평균 (거래일)" },
@@ -3365,6 +3411,8 @@ const SIGNAL_SETTING_FIELDS = [
   { name: "trail_lookback_days", label: "추세선 조회 기간 (거래일)" },
   { name: "trail_atr_multiple", label: "추세 이탈 ATR 배수" },
   { name: "max_weight_rate", label: "한 종목 최대 비중 (%)", percent: true },
+  { name: "rebound_min_reason_cnt", label: "반등 후보 최소 매수 근거 수 (RSI 되돌림이 없을 때)" },
+  { name: "rebound_profit_limit_rate", label: "반등 후보 제외: 평단 위 몇 % 초과 (0이면 이익 중이면 제외)", percent: true },
 ];
 
 function renderSignalSettings() {
@@ -3722,6 +3770,7 @@ function render() {
   renderSignalBanner(syncSignals(holdings).pending); // 시세 시그널 변경 알림
   renderFundEventBanner(syncFundEvents(holdings, prices).pending); // 기업 이벤트(재무·가치 구간) 알림
   renderFundLog(); // 기업 정보 수집 기록·Alpha Vantage 사용량
+  renderFundCheck(holdings); // 재무 점검 요약표 (BL-39)
 
   renderDashboard(holdings, prices);
   renderShare(holdings, prices);
@@ -4848,6 +4897,7 @@ const SCREENS = [
   { id: "dividends", label: "배당 기록", icon: "💰" },
   { id: "data", label: "데이터 관리", icon: "💾" },
   { id: "settings", label: "설정", icon: "⚙️" },
+  { id: "fundcheck", label: "재무 점검", icon: "🩺" },
   { id: "glossary", label: "용어집", icon: "📖" },
 ];
 
@@ -5039,6 +5089,7 @@ setupProfiles();
 setupUsDisplay();
 setupFundSignals();
 setupFundSignalSettings();
+setupFundCheck();
 setupMarketSettings();
 setupGlossary();
 setupRefreshAll();
