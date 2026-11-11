@@ -3258,55 +3258,6 @@ function fundHealthHtml(r, ctx) {
   </div>`;
 }
 
-// 현황 화면의 '기업 이벤트' 배너: 확인하지 않은 이벤트만 보인다.
-function renderFundEventBanner(pending) {
-  const area = document.getElementById("fund-event-banner-area");
-  if (!area) return;
-  if (pending.length === 0) {
-    area.innerHTML = "";
-    return;
-  }
-  const items = pending
-    .map(
-      (e) => `<div class="alert-item" data-key="${escapeHtml(e.key)}" data-event-id="${escapeHtml(e.id)}">
-        <span class="fund-badge fund-event">${FUND_EVENT_LABEL[e.kind] || "이벤트"}</span>
-        <span class="alert-item-text"><strong>${escapeHtml(splitHoldingKey(e.key).stock_name)}</strong><small>${escapeHtml(e.text)}</small></span>
-        <button type="button" class="fetch-btn" data-action="fund-event-go">보기</button>
-        <button type="button" class="fetch-btn" data-action="fund-event-ack">확인</button>
-      </div>`
-    )
-    .join("");
-  area.innerHTML = `<div class="card alert-banner fund-event-banner">
-    <div class="alert-banner-head"><strong>기업 이벤트 ${pending.length}건 ${glossaryBtn("fund_health")}</strong>
-      <button type="button" class="fetch-btn" data-action="fund-event-ack-all">모두 확인</button></div>
-    <div class="hint-text">공시 재무로 계산한 참고 정보이며 투자 권유가 아닙니다.</div>
-    ${items}</div>`;
-}
-
-function setupFundSignals() {
-  // 배너에 보이는 이벤트(.alert-item)를 확인 처리한다. 지금 화면에 있는 항목의 번호를 그대로 쓴다.
-  const acknowledge = (items) => {
-    const map = loadFundEvents();
-    items.forEach(({ key, id }) => {
-      map[key] = FundSignals.acknowledgeEvents(map[key], [id]);
-    });
-    saveFundEvents(map);
-    render();
-  };
-  document.getElementById("fund-event-banner-area").addEventListener("click", (event) => {
-    if (event.target.closest('[data-action="fund-event-ack-all"]')) {
-      acknowledge([...document.querySelectorAll("#fund-event-banner-area .alert-item")].map((el) => ({ key: el.dataset.key, id: el.dataset.eventId })));
-      return;
-    }
-    const item = event.target.closest(".alert-item");
-    if (!item) return;
-    if (event.target.closest('[data-action="fund-event-ack"]')) {
-      acknowledge([{ key: item.dataset.key, id: item.dataset.eventId }]);
-    } else if (event.target.closest('[data-action="fund-event-go"]')) {
-      goToHolding(item.dataset.key);
-    }
-  });
-}
 
 // 설정 화면의 재무 신호 기준값 13개(수정 영역). 비율 값은 화면에서 %로, 배수는 그대로.
 const FUND_SETTING_FIELDS = [
@@ -3402,8 +3353,14 @@ function holdingStyleOf(info, key) {
 }
 
 // 보유 종목의 시그널 상태를 갱신하고 새로 알릴 것을 돌려준다. 바뀌었을 때만 저장한다.
-function syncSignals(holdings) {
-  const keyed = holdings.map((h) => ({ key: holdingKey(h.market_kind, h.stock_name), average_price: h.average_price }));
+function syncSignals(holdings, views = null) {
+  const viewByKey = new Map((views || []).map((v) => [v.holding_key, v]));
+  // 시그널은 종목 분석 모델(StockView)이 이미 계산한 것을 그대로 쓴다(같은 값을 두 번 계산하지 않음, design/17 §12)
+  const keyed = holdings.map((h) => {
+    const key = holdingKey(h.market_kind, h.stock_name);
+    const v = viewByKey.get(key);
+    return { key, average_price: h.average_price, signal: v ? v.signal : undefined };
+  });
   const result = Signals.evaluateSignals(
     loadSignalMap(),
     keyed,
@@ -3419,33 +3376,6 @@ function syncSignals(holdings) {
 function signalBadgeHtml(signal) {
   if (!signal || !["buy_watch", "rebound_watch", "sell_review"].includes(signal.signal_state)) return "";
   return `<span class="signal-badge signal-${signal.signal_state}">${SIGNAL_LABEL[signal.signal_state]}</span>`;
-}
-
-// 현황 화면의 '시그널 변경' 배너: 상태가 바뀌어 아직 확인하지 않은 것만 보인다.
-function renderSignalBanner(pending) {
-  const area = document.getElementById("signal-banner-area");
-  if (!area) return;
-  if (pending.length === 0) {
-    area.innerHTML = "";
-    return;
-  }
-  const items = pending
-    .map(({ key, signal_state, reasons }) => {
-      const { stock_name } = splitHoldingKey(key);
-      return `<div class="alert-item" data-key="${escapeHtml(key)}">
-        <span class="signal-badge signal-${signal_state}">${SIGNAL_LABEL[signal_state]}</span>
-        <span class="alert-item-text"><strong>${escapeHtml(stock_name)}</strong>
-          <small>${escapeHtml((reasons || [])[0] || "")}</small></span>
-        <button type="button" class="fetch-btn" data-action="signal-go">보기</button>
-        <button type="button" class="fetch-btn" data-action="signal-ack">확인</button>
-      </div>`;
-    })
-    .join("");
-  area.innerHTML = `<div class="card alert-banner signal-banner">
-    <div class="alert-banner-head"><strong>시세 시그널 변경 ${pending.length}건 ${glossaryBtn("signal")}</strong>
-      <button type="button" class="fetch-btn" data-action="signal-ack-all">모두 확인</button></div>
-    <div class="hint-text">과거 가격으로 계산한 참고 정보이며 매매 권유가 아닙니다.</div>
-    ${items}</div>`;
 }
 
 // 전체(원화 환산) 대비 종목 비중이 한도를 넘는 종목. 미국 종목이 있는데 환율이 없으면 건너뛴다.
@@ -3567,26 +3497,6 @@ function setupSignalActions() {
     if (!sel) return;
     updateStockInfo(sel.dataset.key, { fund_profile_kind: sel.value });
     render();
-  });
-
-  document.getElementById("signal-banner-area").addEventListener("click", (event) => {
-    const map = loadSignalMap();
-    if (event.target.closest('[data-action="signal-ack-all"]')) {
-      Object.keys(map).forEach((k) => (map[k] = Signals.acknowledgeSignal(map[k])));
-      saveSignalMap(map);
-      render();
-      return;
-    }
-    const item = event.target.closest(".alert-item");
-    if (!item) return;
-    const key = item.dataset.key;
-    if (event.target.closest('[data-action="signal-ack"]')) {
-      map[key] = Signals.acknowledgeSignal(map[key]);
-      saveSignalMap(map);
-      render();
-    } else if (event.target.closest('[data-action="signal-go"]')) {
-      goToHolding(key);
-    }
   });
 }
 
@@ -3757,37 +3667,6 @@ function alertBadgeHtml(rule) {
   return `<span class="alert-badge alert-${rule.alert_state}">${ALERT_STATE_LABEL[rule.alert_state]}</span>`;
 }
 
-// 현황 화면 위쪽 배너: 확인하지 않은 알림만 보인다.
-function renderAlertBanner(pending) {
-  const area = document.getElementById("alert-banner-area");
-  if (!area) return;
-  if (pending.length === 0) {
-    area.innerHTML = "";
-    return;
-  }
-  const rules = loadAlertRules();
-  const prices = loadPrices();
-  const items = pending
-    .map(({ key, alert_state }) => {
-      const { market_kind, stock_name } = splitHoldingKey(key);
-      const rule = rules[key] || {};
-      const level = alert_state === "hit_target" ? rule.target_price : rule.stop_price;
-      const levelLabel = alert_state === "hit_target" ? "목표가" : "손절가";
-      return `<div class="alert-item" data-key="${escapeHtml(key)}">
-        <span class="alert-badge alert-${alert_state}">${ALERT_STATE_LABEL[alert_state]}</span>
-        <span class="alert-item-text"><strong>${escapeHtml(stock_name)}</strong>
-          <small>현재 ${formatMoney(prices[key] || 0, market_kind)} · ${levelLabel} ${formatMoney(level, market_kind)}</small></span>
-        <button type="button" class="fetch-btn" data-action="alert-go">보기</button>
-        <button type="button" class="fetch-btn" data-action="alert-ack">확인</button>
-      </div>`;
-    })
-    .join("");
-  area.innerHTML = `<div class="card alert-banner">
-    <div class="alert-banner-head"><strong>알림 ${pending.length}건</strong>
-      <button type="button" class="fetch-btn" data-action="alert-ack-all">모두 확인</button></div>
-    ${items}</div>`;
-}
-
 // 종목 상세의 목표가·손절가 영역. 평균단가는 r.h.average_price, 현재가는 r.currentPrice.
 function alertSectionHtml(r, rule) {
   if (!rule) return "";
@@ -3840,9 +3719,97 @@ function applyLevelChange(key, level, newPrice) {
   return true;
 }
 
+// ===== 알림함 (design/17 §12, BL-56) =====
+// 목표가·손절가 / 시세 시그널 변경 / 기업 이벤트의 미확인 항목을 현황 위쪽 카드 하나로 모은다. 개수·순서는 js/inbox.js 가 만들고 여기서는 그리기와 확인 처리만 한다.
+let inboxOpen = false; // 펼침 상태(화면에서만 기억)
+const latestInbox = { pending: null };
+
+function inboxItemHtml(it) {
+  const { market_kind, stock_name } = splitHoldingKey(it.key);
+  let badge = "";
+  let text = "";
+  if (it.inbox_kind === "alert") {
+    const rule = loadAlertRules()[it.key] || {};
+    const level = it.alert_state === "hit_target" ? rule.target_price : rule.stop_price;
+    badge = `<span class="alert-badge alert-${it.alert_state}">${ALERT_STATE_LABEL[it.alert_state]}</span>`;
+    text = `현재 ${formatMoney(loadPrices()[it.key] || 0, market_kind)} · ${it.alert_state === "hit_target" ? "목표가" : "손절가"} ${formatMoney(level, market_kind)}`;
+  } else if (it.inbox_kind === "signal") {
+    badge = `<span class="signal-badge signal-${it.signal_state}">${SIGNAL_LABEL[it.signal_state]}</span>`;
+    text = (it.reasons || [])[0] || "";
+  } else {
+    badge = `<span class="fund-badge fund-event">${FUND_EVENT_LABEL[it.kind] || "이벤트"}</span>`;
+    text = it.text;
+  }
+  return `<div class="alert-item" data-key="${escapeHtml(it.key)}" data-inbox-kind="${it.inbox_kind}" data-event-id="${escapeHtml(it.id || "")}">
+    ${badge}
+    <span class="alert-item-text"><strong>${escapeHtml(stock_name)}</strong><small>${escapeHtml(text)}</small></span>
+    <button type="button" class="fetch-btn" data-action="inbox-go">보기</button>
+    <button type="button" class="fetch-btn" data-action="inbox-ack">확인</button>
+  </div>`;
+}
+
+function renderInbox(pending) {
+  const area = document.getElementById("inbox-area");
+  if (!area) return;
+  latestInbox.pending = pending;
+  const box = Inbox.buildInbox(pending);
+  if (box.inbox_total_cnt === 0) {
+    area.innerHTML = "";
+    return;
+  }
+  const glossaryOf = { alert: "", signal: glossaryBtn("signal"), event: glossaryBtn("fund_health") };
+  const sections = box.kind_list
+    .map((k) => `<div class="inbox-kind">${escapeHtml(k.label)} ${k.cnt}건 ${glossaryOf[k.kind]}</div>${box.item_list.filter((it) => it.inbox_kind === k.kind).map(inboxItemHtml).join("")}`)
+    .join("");
+  area.innerHTML = `<div class="card alert-banner inbox-card">
+    <div class="alert-banner-head">
+      <button type="button" class="inbox-toggle" data-action="inbox-toggle" aria-expanded="${inboxOpen}"><strong>알림 ${box.inbox_total_cnt}건</strong> <span class="inbox-arrow">${inboxOpen ? "▴" : "▾"}</span></button>
+      <button type="button" class="fetch-btn" data-action="inbox-ack-all">모두 확인</button>
+    </div>
+    <div class="hint-text inbox-summary">${escapeHtml(box.summary_text)}</div>
+    ${inboxOpen ? `${sections}<div class="hint-text">시세·재무로 계산한 참고 정보이며 투자 권유가 아닙니다.</div>` : ""}
+  </div>`;
+}
+
+// 알림함 항목을 종류에 맞는 방식으로 확인 처리한다(같은 상태에서는 다시 뜨지 않는다).
+function acknowledgeInbox(items) {
+  const rules = loadAlertRules();
+  const signals = loadSignalMap();
+  const events = loadFundEvents();
+  items.forEach(({ inbox_kind, key, id }) => {
+    if (inbox_kind === "alert") rules[key] = AlertRules.acknowledgeAlert(rules[key]);
+    else if (inbox_kind === "signal") signals[key] = Signals.acknowledgeSignal(signals[key]);
+    else events[key] = FundSignals.acknowledgeEvents(events[key], [id]);
+  });
+  saveAlertRules(rules);
+  saveSignalMap(signals);
+  saveFundEvents(events);
+  render();
+}
+
+function setupInbox() {
+  document.getElementById("inbox-area").addEventListener("click", (event) => {
+    if (event.target.closest('[data-action="inbox-toggle"]')) {
+      inboxOpen = !inboxOpen;
+      renderInbox(latestInbox.pending);
+      return;
+    }
+    if (event.target.closest('[data-action="inbox-ack-all"]')) {
+      acknowledgeInbox(Inbox.buildInbox(latestInbox.pending).item_list.map((it) => ({ inbox_kind: it.inbox_kind, key: it.key, id: it.id })));
+      return;
+    }
+    const item = event.target.closest(".alert-item");
+    if (!item) return;
+    if (event.target.closest('[data-action="inbox-ack"]')) {
+      acknowledgeInbox([{ inbox_kind: item.dataset.inboxKind, key: item.dataset.key, id: item.dataset.eventId }]);
+    } else if (event.target.closest('[data-action="inbox-go"]')) {
+      goToHolding(item.dataset.key);
+    }
+  });
+}
+
 function setupAlertActions() {
   const holdingsArea = holdingsAreaProxy;
-  const bannerArea = document.getElementById("alert-banner-area");
 
   holdingsArea.addEventListener("change", (event) => {
     const input = event.target.closest('[data-action="alert-level"]');
@@ -3882,26 +3849,6 @@ function setupAlertActions() {
       delete rules[auto.dataset.key]; // 규칙을 지우면 render 가 권장값으로 다시 만든다(알림 확인 기록은 초기화)
       saveAlertRules(rules);
       render();
-    }
-  });
-
-  bannerArea.addEventListener("click", (event) => {
-    const rules = loadAlertRules();
-    if (event.target.closest('[data-action="alert-ack-all"]')) {
-      Object.keys(rules).forEach((k) => (rules[k] = AlertRules.acknowledgeAlert(rules[k])));
-      saveAlertRules(rules);
-      render();
-      return;
-    }
-    const item = event.target.closest(".alert-item");
-    if (!item) return;
-    const key = item.dataset.key;
-    if (event.target.closest('[data-action="alert-ack"]')) {
-      rules[key] = AlertRules.acknowledgeAlert(rules[key]);
-      saveAlertRules(rules);
-      render();
-    } else if (event.target.closest('[data-action="alert-go"]')) {
-      goToHolding(key);
     }
   });
 }
@@ -3954,10 +3901,11 @@ function render() {
   const holdings = computeHoldings(transactions);
   autoFillSectors(holdings); // 분류한 적 없는 종목에 이름 규칙으로 섹터를 채운다
   renderKnownStockNames(transactions);
-  renderAlertBanner(syncAlerts(holdings, prices).pending); // 목표가·손절가 규칙 맞춤·판정 (보유 화면보다 먼저)
-  renderSignalBanner(syncSignals(holdings).pending); // 시세 시그널 변경 알림
+  const alertPending = syncAlerts(holdings, prices).pending; // 목표가·손절가 규칙 맞춤·판정 (보유 화면보다 먼저)
   const views = computeStockViews(holdings, prices, symbols, loadStockInfo()); // 종목 분석 결과(StockView)를 한 번만 계산해 화면들이 같이 쓴다
-  renderFundEventBanner(syncFundEvents(holdings, prices, views).pending); // 기업 이벤트(재무·가치 구간) 알림
+  const signalPending = syncSignals(holdings, views).pending; // 시세 시그널 변경(StockView의 시그널 재사용)
+  const eventPending = syncFundEvents(holdings, prices, views).pending; // 기업 이벤트(재무·가치 구간)
+  renderInbox({ alert_pending: alertPending, signal_pending: signalPending, event_pending: eventPending }); // 알림함 한 카드
   renderFundLog(); // 기업 정보 수집 기록·Alpha Vantage 사용량
 
   renderDashboard(holdings, prices);
@@ -5312,7 +5260,7 @@ setupSignalSettings();
 setupFundamentals();
 setupProfiles();
 setupUsDisplay();
-setupFundSignals();
+setupInbox();
 setupFundSignalSettings();
 setupMarketSettings();
 setupGlossary();

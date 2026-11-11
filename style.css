@@ -1137,10 +1137,9 @@ details.help summary {
 .alert-settings-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; margin: 8px 0; }
 .alert-settings-grid label { display: flex; flex-direction: column; gap: 3px; font-size: 0.82rem; color: #cbd5e1; }
 .alert-settings-grid input { padding: 5px 6px; background: #0f172a; color: #e2e8f0; border: 1px solid #334155; border-radius: 6px; }
-#alert-banner-area:empty { display: none; } /* 빈 영역이 화면 간격(gap)을 차지하지 않게 */
+#inbox-area:empty { display: none; } /* 빈 영역이 화면 간격(gap)을 차지하지 않게 */
 
 /* ===== 시세 시그널·용어집 (design/11_시그널과용어집.md) ===== */
-#signal-banner-area:empty { display: none; }
 .signal-banner { border-left-color: #199e70; }
 .signal-badge { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 0.72rem; font-weight: 700; color: #fff; }
 .signal-buy_watch { background: #199e70; }
@@ -1200,7 +1199,6 @@ details.help summary {
 .fund-crno input { padding: 4px 6px; background: #0f172a; color: #e2e8f0; border: 1px solid #334155; border-radius: 6px; }
 
 /* ===== 재무 건강·기업 이벤트·종합 판단 (design/13_재무시그널과기업이벤트.md) ===== */
-#fund-event-banner-area:empty { display: none; }
 .fund-event-banner { border-left-color: #a78bfa; }
 .fund-badge { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 0.72rem; font-weight: 700; color: #fff; }
 .fund-good { background: #15803d; }
@@ -1260,3 +1258,7 @@ details.help summary {
 .fund-row .fr-metrics small { color: #94a3b8; }
 .fund-row .fr-reason { margin-top: 2px; }
 .holding-row .hd-note { font-size: 0.78rem; line-height: 1.35; }
+.inbox-toggle { background: none; border: 0; color: inherit; font: inherit; padding: 4px 0; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+.inbox-arrow { color: #94a3b8; }
+.inbox-summary { margin: 0 0 4px; }
+.inbox-kind { margin-top: 8px; font-size: 0.82rem; font-weight: 700; color: #cbd5e1; }

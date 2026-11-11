@@ -310,7 +310,7 @@
     const pending = [];
     let changed = false;
     for (const h of holdings) {
-      const result = computeSignal((historyMap || {})[h.key], settings, atrPeriod, { average_price: h.average_price });
+      const result = h.signal || computeSignal((historyMap || {})[h.key], settings, atrPeriod, { average_price: h.average_price }); // 종목 분석 모델이 이미 계산한 시그널(h.signal)이 있으면 그대로 쓴다(BL-56, 같은 값을 두 번 계산하지 않음)
       const state = result.signal_state;
       const before = next[h.key];
       let entry;
