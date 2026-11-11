@@ -2665,7 +2665,7 @@ function profileSectionHtml(r, ctx) {
         : `<div class="profile-row"><span class="profile-label">하는 일</span><span>${escapeHtml(text)} ${tag("business_summary")}${note}</span></div>`;
   }
   const marketNote =
-    view.market_code && !["Y", "K", "N"].includes(view.market_code)
+    view.market_code && !Fundamentals.isListedMarketCode(view.market_code)
       ? `<div class="hd-note ms-warn">법인 등록 시장 구분이 '${escapeHtml(view.market_name || view.market_code)}'입니다. 상장 법인으로 확인되지 않습니다(상장폐지·비상장일 수 있음, 거래소 공시로 확인하세요).</div>`
       : "";
   const meta = [view.market_name ? `시장 구분 ${escapeHtml(view.market_name)}` : "", view.ceo_name ? `대표 ${escapeHtml(view.ceo_name)}` : "", view.established_date ? `설립 ${escapeHtml(view.established_date)}` : "", view.website_url ? `홈페이지 ${escapeHtml(view.website_url)}` : ""].filter(Boolean).join(" · ");

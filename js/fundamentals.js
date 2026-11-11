@@ -295,6 +295,11 @@
     return { summaries, missing, seen_fields: [...seen] };
   }
 
+  /** 기업기본정보 시장 구분 코드(실제 응답 확인 2026-11-11, design/12 §15): P 유가증권, A 코스닥, E 기타, 빈 값. N(코넥스)은 미확인. Y·K 는 옛 가정이라 허용만 한다. */
+  const LISTED_MARKET_CODES = ["P", "A", "N", "Y", "K"];
+  const MARKET_CODE_NAME = { P: "유가증권", A: "코스닥", N: "코넥스", Y: "유가증권", K: "코스닥", E: "기타" };
+  const isListedMarketCode = (code) => LISTED_MARKET_CODES.includes(String(code || "").trim().toUpperCase());
+
   /** 법인명 비교용: 괄호 안·(주)·주식회사·공백을 없애고 소문자로. */
   function normalizeCorpName(name) {
     return String(name || "")
@@ -315,8 +320,43 @@
   function corpNameVariants(stockName) {
     if (!String(stockName || "").trim()) return [];
     const base = commonStockName(stockName);
-    const list = [stockName, base, `${base}(주)`, `(주)${base}`, `주식회사 ${base}`, `${base} 주식회사`, `㈜${base}`];
+    const forms = (b) => [b, `${b}(주)`, `(주)${b}`, `주식회사 ${b}`, `${b} 주식회사`, `㈜${b}`];
+    const list = [stockName, ...forms(base).slice(0)];
+    // 종목명과 공식 법인명이 다른 경우(실제 응답 확인 2026-11-11, design/12 §15): 약칭 대응표 → 영문을 한글로 음역한 이름
+    const alias = CORP_NAME_ALIASES[base] || CORP_NAME_ALIASES[String(stockName).trim()];
+    if (alias) {
+      list.push(...forms(alias));
+      const aliasKo = koreanizeLatin(alias);
+      if (aliasKo !== alias) list.push(...forms(aliasKo));
+    }
+    const ko = koreanizeLatin(base);
+    if (ko && ko !== base) list.push(...forms(ko));
     return [...new Set(list.map((x) => String(x || "").trim()).filter(Boolean))];
+  }
+
+  /** 종목 약칭 → 공식 법인명. 실제 조회로 확인한 것만 둔다(틀리면 종목 상세 직접 입력의 법인등록번호·사업자번호가 우선). */
+  const CORP_NAME_ALIASES = {
+    한국전력: "한국전력공사",
+    한전기술: "한국전력기술",
+    기업은행: "중소기업은행",
+    HD건설기계: "HD현대건설기계",
+  };
+  /** 영문 단어 → 한글 발음(법인명이 한글로 등록된 경우). 두세 글자 대문자 약자(HD·LS·LG·DL…)는 글자 이름으로 읽는다. */
+  const LATIN_WORDS_KO = { NAVER: "네이버", POSCO: "포스코", ELECTRIC: "일렉트릭", ENERGY: "에너지", SOLUTION: "솔루션", HOLDINGS: "홀딩스" };
+  const LETTER_KO = { A: "에이", B: "비", C: "씨", D: "디", E: "이", F: "에프", G: "지", H: "에이치", I: "아이", J: "제이", K: "케이", L: "엘", M: "엠", N: "엔", O: "오", P: "피", Q: "큐", R: "알", S: "에스", T: "티", U: "유", V: "브이", W: "더블유", X: "엑스", Y: "와이", Z: "제트" };
+
+  /** 이름 속 영문 덩어리를 한글로 바꾼다. 영문이 없으면 원래 이름을 돌려준다. 공백은 없앤다(공식 법인명은 붙여 쓰는 경우가 많다). */
+  function koreanizeLatin(name) {
+    const src = String(name || "");
+    if (!/[A-Za-z]/.test(src)) return src;
+    return src
+      .replace(/[A-Za-z]+/g, (w) => {
+        const up = w.toUpperCase();
+        if (LATIN_WORDS_KO[up]) return LATIN_WORDS_KO[up];
+        if (up.length <= 3) return [...up].map((ch) => LETTER_KO[ch] || ch).join("");
+        return w;
+      })
+      .replace(/\s+/g, "");
   }
 
   /** 단축코드 비교용: 앞의 'A'를 떼고 대문자로. */
@@ -367,9 +407,10 @@
    * @returns {{status:'one'|'many'|'none', crno?:string, corp_name?:string, candidates:{crno:string, corp_name:string, bzno:string, market_name:string, listed:boolean}[]}}
    */
   function pickCorpMatch(items, stockName, opts) {
-    const targets = [normalizeCorpName(stockName), normalizeCorpName(commonStockName(stockName))];
+    // 비교 대상: 종목명뿐 아니라 이름 변형(우선주 뗀 이름·약칭 대응·한글 음역)도 같은 법인으로 본다
+    const targets = [...new Set([normalizeCorpName(stockName), normalizeCorpName(commonStockName(stockName)), ...corpNameVariants(stockName).map(normalizeCorpName)])];
     const wantBzno = normalizeBzno(opts && opts.bzno);
-    const all = (Array.isArray(items) ? items : [])
+    const rawRows = (Array.isArray(items) ? items : [])
       .filter((it) => it && it.crno && it.corpNm)
       .map((it) => ({
         item: it,
@@ -377,8 +418,16 @@
         corp_name: String(it.corpNm),
         bzno: normalizeBzno(it.bzno),
         market_name: String(it.corpRegMrktDcdNm || ""),
-        listed: ["Y", "K", "N"].includes(String(it.corpRegMrktDcd || "")) || String(it.enpPbanYn || "") === "Y",
+        listed: isListedMarketCode(it.corpRegMrktDcd) || String(it.enpPbanYn || "") === "Y",
       }));
+    // 같은 법인이 날짜별로 여러 행으로 오고 시장 구분이 바뀌어 있을 수 있다(예: 상장 전 E → 상장 뒤 P). 한 행이라도 상장이면 상장으로 보고 그 행의 시장 이름을 쓴다
+    const byCrno = new Map();
+    for (const c of rawRows) {
+      const prev = byCrno.get(c.crno);
+      if (!prev) byCrno.set(c.crno, c);
+      else if (c.listed && !prev.listed) byCrno.set(c.crno, { ...c, bzno: prev.bzno || c.bzno });
+    }
+    const all = [...byCrno.values()];
     // 사업자번호를 알면 이름보다 먼저 그 번호로 좁힌다(같은 이름의 법인이 여러 개일 때)
     const same = wantBzno ? all.filter((c) => c.bzno === wantBzno) : all.filter((c) => targets.includes(normalizeCorpName(c.corp_name)));
     const pool = same.length > 0 ? same : [];
@@ -425,10 +474,10 @@
     if (item.enpHmpgUrl) out.website_url = clean(item.enpHmpgUrl, 200);
     if (item.enpRprFnm) out.ceo_name = clean(item.enpRprFnm, 80);
     if (item.enpEstbDt) out.established_date = clean(item.enpEstbDt, 20).replace(/^(\d{4})(\d{2})(\d{2})$/, "$1-$2-$3"); // NR-09: YYYYMMDD 로 오면 YYYY-MM-DD 로 바꾼다
-    // 법인 등록 시장 구분: Y 유가증권, K 코스닥, N 코넥스, 그 밖(E 등)은 기타(비상장일 수 있음)
+    // 법인 등록 시장 구분: P 유가증권, A 코스닥, N 코넥스, 그 밖(E 등)은 기타(비상장일 수 있음)
     if (item.corpRegMrktDcd) {
       out.market_code = clean(item.corpRegMrktDcd, 4);
-      out.market_name = clean(item.corpRegMrktDcdNm || { Y: "유가증권", K: "코스닥", N: "코넥스", E: "기타" }[out.market_code] || "", 30);
+      out.market_name = clean(item.corpRegMrktDcdNm || MARKET_CODE_NAME[out.market_code] || "", 30);
     }
     return out.market_code || out.industry_name || out.website_url || out.ceo_name || out.established_date ? out : null;
   }
@@ -617,7 +666,11 @@
     parseAlphaVantage,
     parseDataGoKrSummary,
     normalizeCorpName,
+    isListedMarketCode,
+    LISTED_MARKET_CODES,
     corpNameVariants,
+    koreanizeLatin,
+    CORP_NAME_ALIASES,
     normalizeShortCode,
     pickListedMatch,
     isFundLike,
