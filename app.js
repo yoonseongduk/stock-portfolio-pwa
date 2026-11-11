@@ -2164,37 +2164,59 @@ async function fetchDataGoKrService(url, apiKey, query, numOfRows) {
 }
 
 // 종목명으로 법인등록번호를 찾는다(찾으면 저장해 두고 다음부터 재사용). 사용자가 직접 넣은 번호가 있으면 그것을 쓴다.
+// 순서(design/12 §14): ① 저장된 번호 ② 기업기본정보 법인명(이름 변형) ③ KRX상장종목정보(시세 코드·종목명) ④ 실패하면 시도 내역을 문구에 붙인다.
+const DATAGOKR_KRX_URL = "https://apis.data.go.kr/1160100/service/GetKrxListedInfoService/getItemInfo";
+
 async function resolveCorpId(stockName, apiKey) {
   const key = holdingKey("kr", stockName);
   const saved = loadCorpIds()[key];
   if (saved && saved.crno) return { ok: true, crno: saved.crno, corp_name: saved.corp_name || "", item: null };
   const bzno = saved && saved.bzno ? saved.bzno : "";
-  const base = Fundamentals.commonStockName(stockName);
+  const found = (pick) => {
+    const ids = loadCorpIds();
+    ids[key] = { crno: pick.crno, corp_name: pick.corp_name, ...(bzno ? { bzno } : {}) };
+    saveCorpIds(ids);
+    return { ok: true, crno: pick.crno, corp_name: pick.corp_name, item: pick.item || null };
+  };
+  const tried = []; // 진단: 시도한 것과 건수
   let last = { status: "none", candidates: [] };
-  for (const name of [...new Set([stockName, base, `${base}(주)`, `(주)${base}`])]) {
+  for (const name of Fundamentals.corpNameVariants(stockName)) {
     const items = await fetchDataGoKrService(DATAGOKR_CORP_URL, apiKey, { corpNm: name }, 100);
+    tried.push(`법인명 '${name}' ${items.length}건`);
     if (items.length === 0) continue;
     const pick = Fundamentals.pickCorpMatch(items, stockName, { bzno });
-    if (pick.status === "one") {
-      const ids = loadCorpIds();
-      ids[key] = { crno: pick.crno, corp_name: pick.corp_name, ...(bzno ? { bzno } : {}) };
-      saveCorpIds(ids);
-      return { ok: true, crno: pick.crno, corp_name: pick.corp_name, item: pick.item || null };
-    }
+    if (pick.status === "one") return found(pick);
     last = pick;
     if (pick.status === "many") break;
   }
+  // ③ 이름으로 못 찾았고 사업자번호로 지정하지 않았으면 KRX상장종목정보에서 시세 코드로 찾는다
+  let krxNote = "";
+  if (last.status !== "many" && !bzno) {
+    const code = loadSymbols()[key] || "";
+    try {
+      const items = await fetchDataGoKrService(DATAGOKR_KRX_URL, apiKey, { likeItmsNm: Fundamentals.commonStockName(stockName) }, 100);
+      const pick = Fundamentals.pickListedMatch(items, stockName, code);
+      tried.push(`KRX 상장종목정보 ${items.length}건`);
+      if (pick.status === "one") return found(pick);
+      if (pick.status === "many") last = { status: "many", candidates: pick.candidates.map((c) => ({ crno: c.crno, corp_name: c.corp_name, bzno: "", market_name: "" })) };
+      else if (items.length > 0 && pick.candidates.length === 0) krxNote = ` (KRX 응답 항목: ${pick.seen_fields.join(", ")})`;
+    } catch (e) {
+      tried.push(`KRX 상장종목정보 오류: ${String(e.message).slice(0, 60)}`);
+      if (/등록되어 있지 않/.test(e.message)) krxNote = " (법인 찾기를 돕는 KRX상장종목정보는 공공데이터포털에서 '금융위원회_KRX상장종목정보' 활용신청이 필요합니다)";
+    }
+  }
+  const diag = ` · 시도: ${tried.join(" · ")}${krxNote}`;
   // 후보에는 법인등록번호와 함께 사업자번호·시장 구분을 보여 줘서 맞는 법인을 가릴 수 있게 한다
   const fmtBz = (b) => (b ? `${b.slice(0, 3)}-${b.slice(3, 5)}-${b.slice(5)}` : "");
   const list = last.candidates.map((c) => `${c.corp_name}[법인등록번호 ${c.crno}${c.bzno ? ` · 사업자 ${fmtBz(c.bzno)}` : ""}${c.market_name ? ` · ${c.market_name}` : ""}]`).join(", ");
   return {
     ok: false,
     message:
-      last.status === "many"
+      (last.status === "many"
         ? `같은 이름의 법인이 여러 개입니다: ${list}. 직접 입력 > 법인등록번호 칸에 법인등록번호(13자리)나 사업자등록번호(10자리)를 넣어 주세요`
         : bzno
           ? `사업자등록번호 ${fmtBz(bzno)}와 같은 법인을 찾지 못했습니다${list ? ` (비슷한 법인: ${list})` : ""}. 번호와 종목명을 확인해 주세요`
-          : `종목명과 같은 법인을 찾지 못했습니다${list ? ` (비슷한 법인: ${list})` : ""}. 직접 입력 > 법인등록번호 칸에 법인등록번호(13자리)나 사업자등록번호(10자리)를 넣어 주세요`,
+          : `종목명과 같은 법인을 찾지 못했습니다${list ? ` (비슷한 법인: ${list})` : ""}. 직접 입력 > 법인등록번호 칸에 법인등록번호(13자리)나 사업자등록번호(10자리)를 넣어 주세요`) + diag,
   };
 }
 
@@ -2237,6 +2259,7 @@ async function fetchFundamentalsKR(stockName) {
 
 // 시장에 맞는 출처로 한 종목의 기업 정보를 받고 결과를 수집 기록에 남긴다.
 async function fetchFundamentalsOne(marketKind, stockName) {
+  if (Fundamentals.isFundLike(stockName)) return { ok: false, fund_like: true, message: "ETF·펀드는 기업 재무제표가 없어 받지 않습니다" }; // BL-42: 호출·기록 없음
   const provider = marketKind === "kr" ? "datagokr" : loadFundApiKey() ? "alphavantage" : "twelvedata";
   const result = await (marketKind === "kr" ? fetchFundamentalsKR(stockName) : fetchFundamentalsUS(stockName));
   appendFundLog({
@@ -2380,10 +2403,13 @@ async function fetchFundamentalsAll() {
   // 국내(호출 제한이 느슨함)를 먼저, 미국(분당 8회 제한)은 뒤에서 천천히. 시세 코드가 있는 종목만, 최근 30일 안에 받은 종목은 건너뜀
   const holdingsAll = computeHoldings(loadTransactions()).filter((h) => symbols[holdingKey(h.market_kind, h.stock_name)]);
   const fromLog = holdingsAll.filter((h) => todayFundLog(holdingKey(h.market_kind, h.stock_name))).length; // 오늘 이미 받은 종목은 다시 받지 않고 기록으로 대신한다
+  const fundSkipped = holdingsAll.filter((h) => Fundamentals.isFundLike(h.stock_name)).length; // ETF·ETN 은 재무가 없어 받지 않는다(BL-42)
   const targets = holdingsAll
+    .filter((h) => !Fundamentals.isFundLike(h.stock_name))
     .filter((h) => !recently(holdingKey(h.market_kind, h.stock_name)) && !todayFundLog(holdingKey(h.market_kind, h.stock_name)))
     .sort((a, b) => (a.market_kind === b.market_kind ? 0 : a.market_kind === "kr" ? -1 : 1));
   const failed = [];
+  const failedNames = [];
   let filled = 0;
   let stopped = false;
   for (let i = 0; i < targets.length; i++) {
@@ -2394,7 +2420,10 @@ async function fetchFundamentalsAll() {
     setFundManageStatus(`기업 정보 받는 중... (${i + 1}/${targets.length}) ${targets[i].stock_name}`);
     const result = await fetchFundamentalsOne(targets[i].market_kind, targets[i].stock_name);
     if (result.ok) filled++;
-    else failed.push(`${targets[i].stock_name}: ${result.message}`);
+    else {
+      failed.push(`${targets[i].stock_name}: ${result.message}`);
+      failedNames.push(targets[i].stock_name);
+    }
     if (result.daily_limit) {
       stopped = true; // 하루 한도에 닿으면 남은 종목은 내일 이어서 받는다
       break;
@@ -2402,7 +2431,7 @@ async function fetchFundamentalsAll() {
     const gap = targets[i].market_kind === "us" && loadFundApiKey() ? AV_GAP_MS : REFRESH_GAP_MS[targets[i].market_kind] ?? 0;
     if (i < targets.length - 1) await sleep(gap);
   }
-  return { target_cnt: targets.length, filled, failed, stopped, from_log: fromLog };
+  return { target_cnt: targets.length, filled, failed, failed_names: failedNames, stopped, from_log: fromLog, fund_skipped: fundSkipped };
 }
 
 function setFundManageStatus(text) {
@@ -2565,11 +2594,12 @@ function setupFundamentals() {
     try {
       const r = await fetchFundamentalsAll();
       render();
-      const shown = r.failed.slice(0, 2).join(", ") + (r.failed.length > 2 ? ` 외 ${r.failed.length - 2}개` : "");
+      const names = r.failed_names.slice(0, 8).join(", ") + (r.failed_names.length > 8 ? ` 외 ${r.failed_names.length - 8}개` : "");
+      const fundNote = r.fund_skipped ? ` · ETF ${r.fund_skipped}종목은 재무가 없어 받지 않았습니다` : "";
       setFundManageStatus(
         r.target_cnt === 0
-          ? `받을 종목이 없습니다 (시세 코드가 없거나 최근 30일 안에 받은 종목은 건너뜁니다${r.from_log ? `, 오늘 이미 받은 ${r.from_log}종목은 기록으로 대신합니다` : ""}).`
-          : `기업 정보 ${r.filled}종목 받음` + (r.failed.length > 0 ? ` · 실패 ${r.failed.length}개 (${shown})` : "") + (r.stopped ? " · Alpha Vantage 하루 한도로 중단했습니다. 남은 종목은 내일 다시 누르면 이어서 받습니다(받은 종목은 건너뜀)" : "") + (r.from_log ? ` · 오늘 이미 받은 ${r.from_log}종목은 다시 받지 않고 기록으로 대신했습니다` : "")
+          ? `받을 종목이 없습니다 (시세 코드가 없거나 최근 30일 안에 받은 종목은 건너뜁니다${r.from_log ? `, 오늘 이미 받은 ${r.from_log}종목은 기록으로 대신합니다` : ""}${r.fund_skipped ? `, ETF ${r.fund_skipped}종목은 재무가 없어 제외합니다` : ""}).`
+          : `기업 정보 ${r.filled}종목 받음` + (r.failed.length > 0 ? ` · 실패 ${r.failed.length}개 (${names}) · 첫 실패: ${r.failed[0]} (종목별 사유는 아래 수집 기록)` : "") + fundNote + (r.stopped ? " · Alpha Vantage 하루 한도로 중단했습니다. 남은 종목은 내일 다시 누르면 이어서 받습니다(받은 종목은 건너뜀)" : "") + (r.from_log ? ` · 오늘 이미 받은 ${r.from_log}종목은 다시 받지 않고 기록으로 대신했습니다` : "")
       );
     } finally {
       fundamentalsRunning = false;
@@ -2936,7 +2966,7 @@ function renderFundLog() {
     .map((e) => {
       const name = splitHoldingKey(e.key).stock_name;
       const when = `${localDateOf(e.at).slice(5)} ${localTimeOf(e.at)}`;
-      return `<li class="${e.ok ? "fl-ok" : "fl-fail"}">${when} · ${escapeHtml(name)} · ${FUND_PROVIDER_LABEL[e.provider] || e.provider} · ${e.ok ? describeFundLog(e) : "실패: " + escapeHtml((e.message || "").slice(0, 80))}</li>`;
+      return `<li class="${e.ok ? "fl-ok" : "fl-fail"}">${when} · ${escapeHtml(name)} · ${FUND_PROVIDER_LABEL[e.provider] || e.provider} · ${e.ok ? describeFundLog(e) : "실패: " + escapeHtml((e.message || "").slice(0, 260))}</li>`;
     })
     .join("");
   area.innerHTML = `<div class="hd-note">Alpha Vantage 오늘 사용 ${used}/${AV_DAILY_LIMIT}회 (종목당 ${AV_CALLS_PER_STOCK}회 · 이 기기에서 센 값이라 실제와 다를 수 있음)</div>
@@ -2952,11 +2982,12 @@ function renderFundCheck(holdings) {
   const fundMap = loadFundamentals();
   const items = holdings.map((h) => {
     const key = holdingKey(h.market_kind, h.stock_name);
-    return { key, stock_name: h.stock_name, market_kind: h.market_kind, years: Fundamentals.yearsOf(fundMap, key) };
+    return { key, stock_name: h.stock_name, market_kind: h.market_kind, years: Fundamentals.yearsOf(fundMap, key), is_fund_like: Fundamentals.isFundLike(h.stock_name) };
   });
   const sum = FundSignals.buildFundSummary(items, loadFundSignalSettings());
   document.getElementById("fundcheck-count").innerHTML =
-    `재무 수집 <strong>${sum.fund_collected_cnt}/${sum.holding_cnt}</strong>종목` +
+    `재무 수집 <strong>${sum.fund_collected_cnt}/${sum.fund_target_cnt}</strong>종목` +
+    (sum.fund_excluded_cnt > 0 ? ` <span class="hd-note">(ETF ${sum.fund_excluded_cnt}종목 제외 ${glossaryBtn("etf")})</span>` : "") +
     (sum.fund_missing_cnt > 0 ? ` <span class="hd-note">(${sum.fund_missing_cnt}종목은 기업 정보를 아직 받지 않았습니다. 보유 화면의 '기업 정보 관리'에서 받으세요)</span>` : "");
   if (sum.fund_summary_row_list.length === 0) {
     area.innerHTML = '<p class="empty-message">아직 보유 중인 종목이 없습니다.</p>';

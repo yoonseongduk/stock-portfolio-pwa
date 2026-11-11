@@ -308,6 +308,46 @@
     return String(stockName || "").replace(/\s*\d?우[A-C]?$/, "");
   }
 
+  /**
+   * 기업기본정보 `corpNm` 조회에 순서대로 시도할 이름 변형(BL-41, design/12 §14).
+   * 종목명, 우선주 표기를 뗀 이름, X(주), (주)X, 주식회사 X, X 주식회사, ㈜X. 중복은 뺀다.
+   */
+  function corpNameVariants(stockName) {
+    if (!String(stockName || "").trim()) return [];
+    const base = commonStockName(stockName);
+    const list = [stockName, base, `${base}(주)`, `(주)${base}`, `주식회사 ${base}`, `${base} 주식회사`, `㈜${base}`];
+    return [...new Set(list.map((x) => String(x || "").trim()).filter(Boolean))];
+  }
+
+  /** 단축코드 비교용: 앞의 'A'를 떼고 대문자로. */
+  const normalizeShortCode = (code) => String(code || "").trim().replace(/^A(?=\d)/i, "").toUpperCase();
+
+  /**
+   * KRX상장종목정보(getItemInfo) 응답에서 종목에 맞는 법인을 고른다(BL-41, design/12 §14).
+   * 시세 코드가 있으면 단축코드(srtnCd)가 같은 행을 우선하고, 없거나 못 찾으면 종목명(itmsNm)이 같은 행을 쓴다.
+   * @returns {{status:'one'|'many'|'none', crno?:string, corp_name?:string, candidates:{crno:string, corp_name:string, item_name:string, short_code:string}[], seen_fields:string[]}}
+   */
+  function pickListedMatch(items, stockName, symbolCode) {
+    const rows = (Array.isArray(items) ? items : []).filter((it) => it && typeof it === "object");
+    const seen = rows.length ? Object.keys(rows[0]).slice(0, 14) : [];
+    const all = rows
+      .filter((it) => it.crno)
+      .map((it) => ({ crno: String(it.crno), corp_name: String(it.corpNm || ""), item_name: String(it.itmsNm || ""), short_code: normalizeShortCode(it.srtnCd) }));
+    const code = normalizeShortCode(symbolCode);
+    const names = [normalizeCorpName(stockName), normalizeCorpName(commonStockName(stockName))];
+    let pool = code ? all.filter((c) => c.short_code === code) : [];
+    if (pool.length === 0) pool = all.filter((c) => names.includes(normalizeCorpName(c.item_name)));
+    const uniq = [...new Map(pool.map((c) => [c.crno, c])).values()];
+    if (uniq.length === 1) return { status: "one", crno: uniq[0].crno, corp_name: uniq[0].corp_name, candidates: uniq, seen_fields: seen };
+    if (uniq.length > 1) return { status: "many", candidates: uniq, seen_fields: seen };
+    return { status: "none", candidates: all.slice(0, 5), seen_fields: seen };
+  }
+
+  /** ETF·ETN 처럼 손익·재무상태표가 없는 종목인지 이름으로 판정한다(BL-42). */
+  function isFundLike(stockName) {
+    return /(^|[^A-Za-z])(ETF|ETN)([^A-Za-z]|$)/i.test(String(stockName || ""));
+  }
+
   /** 사업자등록번호(10자리)에서 숫자만 남긴다. 10자리가 아니면 빈 문자열. */
   function normalizeBzno(v) {
     const d = String(v === undefined || v === null ? "" : v).replace(/[^0-9]/g, "");
@@ -577,6 +617,10 @@
     parseAlphaVantage,
     parseDataGoKrSummary,
     normalizeCorpName,
+    corpNameVariants,
+    normalizeShortCode,
+    pickListedMatch,
+    isFundLike,
     commonStockName,
     normalizeBzno,
     parseCorpNumber,

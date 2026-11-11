@@ -447,6 +447,16 @@
       term_used_in: "보유 화면의 그룹·필터.",
     },
     {
+      term_id: "etf",
+      term_name: "ETF·ETN (상장지수펀드·지수연동증권)",
+      term_aliases: ["ETF", "ETN", "상장지수펀드", "지수연동증권", "펀드"],
+      term_category: "market",
+      term_summary: "지수나 여러 종목 묶음을 따라가도록 만든 상품으로, 한 회사가 아니라서 손익·재무상태표가 없습니다.",
+      term_detail: "ETF는 주식처럼 거래소에서 사고팔 수 있는 펀드이고, ETN은 증권사가 지수 수익을 약속하는 증권입니다. 개별 기업이 아니어서 매출·영업이익·부채 같은 기업 재무가 없습니다. 이 앱은 이름에 ETF·ETN이 들어간 종목은 기업 정보(재무)를 받지 않고, 재무 점검의 수집 건수에서도 뺍니다. 시세 시그널은 그대로 볼 수 있습니다.",
+      term_formula: null,
+      term_used_in: "기업 정보 일괄 받기(ETF 제외), 재무 점검의 수집 N/전체.",
+    },
+    {
       term_id: "sector",
       term_name: "섹터",
       term_aliases: ["업종", "산업"],
