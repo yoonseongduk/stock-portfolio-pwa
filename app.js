@@ -1794,6 +1794,34 @@ function setupBackfill() {
 }
 
 // 보유 화면만 다시 그린다(검색·필터를 바꿀 때).
+// 보유 화면의 그 종목으로 간다(BL-44, design/02 §7): 종목을 펼치고, 필터·접힌 그룹 때문에 안 보이면 풀고, 그 자리로 스크롤한다.
+// 알림 배너·재무 점검의 '보기'가 모두 이것을 쓴다(화면을 바꾸면 스크롤이 맨 위로 돌아가기 때문에 직접 이동해야 한다).
+function findHoldingEl(key) {
+  return [...document.querySelectorAll("#holdings-area .holding-item")].find((e) => e.dataset.key === key) || null;
+}
+function goToHolding(key) {
+  openHoldingKeys.add(key);
+  showScreen("holdings");
+  renderHoldingsOnly();
+  let el = findHoldingEl(key);
+  if (!el) {
+    // 시장·시그널 필터나 검색어 때문에 가려져 있으면 필터를 푼다
+    holdingsView = { ...holdingsView, market_filter: "all", exchange_filter: "all", sector_filter: "all", signal_filter: "all", search_text: "" };
+    saveHoldingsView();
+    renderHoldingsOnly();
+    el = findHoldingEl(key);
+  }
+  if (!el) return false;
+  const group = el.closest(".holding-group");
+  if (group) {
+    collapsedGroupIds.delete(group.dataset.group);
+    group.open = true;
+  }
+  el.open = true;
+  el.scrollIntoView({ block: "start" });
+  return true;
+}
+
 function renderHoldingsOnly() {
   renderHoldings(computeHoldings(loadTransactions()), loadPrices(), loadSymbols(), loadStockInfo(), loadTransactions(), loadDividends());
 }
@@ -3014,9 +3042,7 @@ function setupFundCheck() {
     if (event.target.closest("[data-glossary]")) return; // ? 버튼은 용어집이 처리한다
     const row = event.target.closest("tr[data-key]");
     if (!row) return;
-    openHoldingKeys.add(row.dataset.key);
-    showScreen("holdings");
-    renderHoldingsOnly();
+    goToHolding(row.dataset.key);
   });
 }
 // ===== 재무 점검 요약표 END =====
@@ -3150,9 +3176,7 @@ function setupFundSignals() {
     if (event.target.closest('[data-action="fund-event-ack"]')) {
       acknowledge([{ key: item.dataset.key, id: item.dataset.eventId }]);
     } else if (event.target.closest('[data-action="fund-event-go"]')) {
-      openHoldingKeys.add(item.dataset.key);
-      showScreen("holdings");
-      renderHoldingsOnly();
+      goToHolding(item.dataset.key);
     }
   });
 }
@@ -3424,9 +3448,7 @@ function setupSignalActions() {
       saveSignalMap(map);
       render();
     } else if (event.target.closest('[data-action="signal-go"]')) {
-      openHoldingKeys.add(key);
-      showScreen("holdings");
-      renderHoldingsOnly();
+      goToHolding(key);
     }
   });
 }
@@ -3742,9 +3764,7 @@ function setupAlertActions() {
       saveAlertRules(rules);
       render();
     } else if (event.target.closest('[data-action="alert-go"]')) {
-      openHoldingKeys.add(key);
-      showScreen("holdings");
-      renderHoldingsOnly();
+      goToHolding(key);
     }
   });
 }
